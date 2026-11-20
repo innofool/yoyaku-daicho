@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="予約台帳">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#ffffff">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<title>予約台帳</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- 合言葉の画面 -->
+<section id="gate" class="gate" hidden>
+  <div class="gate-card">
+    <h1>予約台帳</h1>
+    <p class="gate-note">お客様の情報はこの端末（iPad）の中に、暗号化して保存されます。インターネットには送りません。</p>
+    <form id="gate-form" autocomplete="off">
+      <label>合言葉<input type="password" id="gate-pass" autocomplete="current-password" required></label>
+      <label id="gate-pass2-wrap" hidden>もう一度（確認）<input type="password" id="gate-pass2" autocomplete="new-password"></label>
+      <p id="gate-hint" class="hint"></p>
+      <p id="gate-err" class="err" role="alert"></p>
+      <button type="submit" id="gate-btn" class="primary">開く</button>
+    </form>
+    <p class="gate-dir">合言葉を忘れると、だれにも開けられません（作った人にも）。紙に控えて安全な場所に保管してください。</p>
+  </div>
+</section>
+
+<!-- 本体 -->
+<div id="app" class="app" hidden>
+  <header class="top">
+    <div class="brand" id="store-name">予約台帳</div>
+    <nav class="tabs" role="tablist">
+      <button data-view="ledger" class="on">台帳</button>
+      <button data-view="list">予約一覧</button>
+      <button data-view="customers">お客様</button>
+      <button data-view="stats">集計</button>
+      <button data-view="settings">設定</button>
+    </nav>
+    <div class="top-right">
+      <button id="btn-new" class="primary">＋ 予約を入れる</button>
+      <button id="btn-lock" class="ghost" title="画面をロックします">ロック</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- 台帳 -->
+    <section id="v-ledger" class="view">
+      <aside class="side">
+        <div class="datebar">
+          <button id="d-prev" aria-label="前の日">‹</button>
+          <button id="d-today">今日</button>
+          <button id="d-next" aria-label="次の日">›</button>
+        </div>
+        <div class="day-title" id="day-title"></div>
+        <div class="cal" id="cal"></div>
+        <div class="day-sum" id="day-sum"></div>
+      </aside>
+      <div class="ledger-main">
+        <div class="legend">
+          <span class="lg booked">予約</span><span class="lg seated">来店中</span><span class="lg left">退店</span><span class="lg cancel">キャンセル</span>
+          <label class="chk"><input type="checkbox" id="show-cancel"> キャンセルも表示</label>
+        </div>
+        <div class="grid-wrap" id="grid-wrap"><div class="grid" id="grid"></div></div>
+      </div>
+      <aside class="daylist" id="daylist"></aside>
+    </section>
+
+    <!-- 予約一覧 -->
+    <section id="v-list" class="view" hidden>
+      <div class="toolbar">
+        <label>期間 <input type="date" id="l-from"> 〜 <input type="date" id="l-to"></label>
+        <input type="search" id="l-q" placeholder="お名前・電話で絞り込み">
+        <button id="l-go">表示</button>
+      </div>
+      <div class="table-wrap"><table class="tbl" id="l-table"></table></div>
+    </section>
+
+    <!-- お客様 -->
+    <section id="v-customers" class="view" hidden>
+      <div class="toolbar">
+        <input type="search" id="c-q" placeholder="お名前・ふりがな・電話番号・タグで検索">
+        <label class="chk"><input type="checkbox" id="c-stale"> 保管期間を過ぎたお客様だけ</label>
+        <button id="c-new">＋ お客様を登録</button>
+        <span id="c-count" class="muted"></span>
+      </div>
+      <div class="cust-layout">
+        <div class="table-wrap"><table class="tbl" id="c-table"></table></div>
+        <div class="cust-detail" id="c-detail"><p class="muted">お客様を選ぶと、来店の履歴が出ます。</p></div>
+      </div>
+    </section>
+
+    <!-- 集計 -->
+    <section id="v-stats" class="view" hidden>
+      <div class="toolbar">
+        <label>期間 <input type="date" id="s-from"> 〜 <input type="date" id="s-to"></label>
+        <button id="s-go">集計</button>
+        <span class="sep"></span>
+        <button id="s-csv" title="お名前・電話番号は入りません">レジ連携用CSVを書き出す</button>
+      </div>
+      <div id="s-body"></div>
+    </section>
+
+    <!-- 設定 -->
+    <section id="v-settings" class="view" hidden>
+      <div id="set-body" class="settings"></div>
+    </section>
+  </main>
+</div>
+
+<!-- 予約の入力 -->
+<dialog id="dlg-res" class="dlg">
+  <form method="dialog" id="res-form" autocomplete="off">
+    <h2 id="res-title">予約を入れる</h2>
+    <div class="row">
+      <label>日付<input type="date" name="date" required></label>
+      <label>時刻<input type="time" name="time" step="900" required></label>
+      <label>人数<input type="number" name="guests" min="1" max="300" value="2" required></label>
+      <label>滞在（分）<input type="number" name="stayMin" min="15" max="720" step="15" required></label>
+    </div>
+    <fieldset class="cust-box">
+      <legend>お客様</legend>
+      <div class="row">
+        <label>電話番号<input type="tel" name="phone" inputmode="tel"></label>
+        <label>お名前<input type="text" name="name"></label>
+        <label>ふりがな<input type="text" name="kana"></label>
+      </div>
+      <div id="res-match" class="match"></div>
+      <label>アレルギー・苦手なもの<input type="text" name="allergy"></label>
+    </fieldset>
+    <div class="row">
+      <label>経路<select name="source"></select></label>
+      <label>コース<select name="courseId"></select></label>
+      <label>状態<select name="status">
+        <option value="booked">予約</option><option value="seated">来店中</option><option value="left">退店</option>
+        <option value="cancel">キャンセル</option><option value="noshow">無断キャンセル</option>
+      </select></label>
+    </div>
+    <div class="tables-pick">
+      <div class="lbl">席（複数選べます）</div>
+      <div id="res-tables" class="chips"></div>
+    </div>
+    <label>メモ（この予約について）<textarea name="memo" rows="2"></textarea></label>
+    <p id="res-err" class="err" role="alert"></p>
+    <div class="actions">
+      <button type="button" id="res-del" class="danger">削除</button>
+      <span class="sep"></span>
+      <button type="button" id="res-cancel">閉じる</button>
+      <button type="submit" id="res-save" class="primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- お客様の入力 -->
+<dialog id="dlg-cust" class="dlg">
+  <form method="dialog" id="cust-form" autocomplete="off">
+    <h2 id="cust-title">お客様</h2>
+    <div class="row">
+      <label>お名前<input type="text" name="name"></label>
+      <label>ふりがな<input type="text" name="kana"></label>
+      <label>電話番号<input type="tel" name="phone"></label>
+    </div>
+    <label>タグ（読点「、」で区切る。例：常連、法人、記念日）<input type="text" name="tags"></label>
+    <label>アレルギー・苦手なもの<input type="text" name="allergy"></label>
+    <label>お客様のメモ（好み・接客のこと）<textarea name="memo" rows="3"></textarea></label>
+    <p class="hint">メモには、必要なことだけを書いてください。健康や家族など踏み込んだ情報は書かないのが安全です。</p>
+    <p id="cust-err" class="err" role="alert"></p>
+    <div class="actions">
+      <button type="button" id="cust-del" class="danger">このお客様の情報を消す</button>
+      <span class="sep"></span>
+      <button type="button" id="cust-cancel">閉じる</button>
+      <button type="submit" class="primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" role="status"></div>
+<script src="core.js"></script>
+<script src="vault.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
