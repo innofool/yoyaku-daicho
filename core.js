@@ -43,12 +43,12 @@
       settings: { storeName: '', open: '11:00', close: '23:00', defaultStayMin: 120, lunchEnd: '17:30', autoLockMin: 10, retentionYears: 3 },
       // 最初の席は仮のもの。設定画面でお店の席に直す。
       tables: [
-        { id: newId('t_'), name: 'テーブル1', cap: 4, area: 'ホール', pos: '' },
-        { id: newId('t_'), name: 'テーブル2', cap: 4, area: 'ホール', pos: '' },
-        { id: newId('t_'), name: 'テーブル3', cap: 4, area: 'ホール', pos: '' },
-        { id: newId('t_'), name: 'カウンター1', cap: 2, area: 'カウンター', pos: '' },
-        { id: newId('t_'), name: 'カウンター2', cap: 2, area: 'カウンター', pos: '' },
-        { id: newId('t_'), name: '個室1', cap: 8, area: '個室', pos: '' },
+        { id: newId('t_'), name: 'C1', min: 1, cap: 2, area: 'カウンター', pos: '' },
+        { id: newId('t_'), name: 'C2', min: 1, cap: 2, area: 'カウンター', pos: '' },
+        { id: newId('t_'), name: 'T1', min: 2, cap: 4, area: 'ホール', pos: '' },
+        { id: newId('t_'), name: 'T2', min: 2, cap: 4, area: 'ホール', pos: '' },
+        { id: newId('t_'), name: 'T3', min: 3, cap: 6, area: 'ホール', pos: '' },
+        { id: newId('t_'), name: '個室1', min: 4, cap: 8, area: '個室', pos: '' },
       ],
       courses: [],
       customers: [],
@@ -96,7 +96,10 @@
           if (seen.has(name)) throw bad('同じ名前の席があります：' + name);
           seen.add(name);
           const old = d.tables.find((x) => x.id === t.id);
-          return { id: old ? old.id : newId('t_'), name, cap: int(t.cap, 1, 200, '席の人数'), area: str(t.area, 30), pos: str(t.pos, 30) };
+          const cap = int(t.cap, 1, 200, '席の人数');
+          const min = int(t.min == null || t.min === '' ? 1 : t.min, 1, 200, '席の最小人数');
+          if (min > cap) throw bad(name + 'の定員が正しくありません（最小が最大より大きい）');
+          return { id: old ? old.id : newId('t_'), name, min, cap, area: str(t.area, 30), pos: str(t.pos, 30) };
         });
         // 外した席に入っていた予約は「席未定」にする
         const ids = new Set(d.tables.map((t) => t.id));
@@ -137,7 +140,7 @@
     _brief(c) {
       if (!c) return null;
       const s = this._custStats().get(c.id) || { visits: 0, cancels: 0, noshows: 0, last: '', next: '' };
-      return { id: c.id, no: c.no, name: c.name, kana: c.kana, phone: c.phone, tags: c.tags, allergy: c.allergy, memo: c.memo, visits: s.visits, cancels: s.cancels, noshows: s.noshows, last: s.last, next: s.next };
+      return { id: c.id, no: c.no, name: c.name, kana: c.kana, phone: c.phone, company: c.company || '', anniv: c.anniv || '', tags: c.tags, allergy: c.allergy, memo: c.memo, visits: s.visits, cancels: s.cancels, noshows: s.noshows, last: s.last, next: s.next };
     }
 
     _staleBefore() {
@@ -155,9 +158,11 @@
       const staleBefore = this._staleBefore();
       let list = this.db.customers;
       if (q) {
-        list = list.filter((c) => normText(c.name).includes(q) || normText(c.kana).includes(q)
-          || (qd.length >= 3 && normPhone(c.phone).includes(qd)) || c.tags.some((t) => normText(t).includes(q)));
+        list = list.filter((c) => normText(c.name).includes(q) || normText(c.kana).includes(q) || normText(c.company).includes(q)
+          || normText(c.memo).includes(q) || (qd.length >= 3 && normPhone(c.phone).includes(qd)) || c.tags.some((t) => normText(t).includes(q)));
       }
+      if (opt.tag) { const tg = normText(opt.tag); list = list.filter((c) => c.tags.some((t) => normText(t) === tg)); }
+      if (opt.minVisits) { const mv = +opt.minVisits; list = list.filter((c) => ((stats.get(c.id) || {}).visits || 0) >= mv); }
       if (opt.stale) {
         list = list.filter((c) => {
           const s = stats.get(c.id);
@@ -166,9 +171,15 @@
         });
       }
       const total = list.length;
-      const out = list.map((c) => this._brief(c))
-        .sort((a, b) => (b.last || '').localeCompare(a.last || '') || b.no - a.no).slice(0, limit);
-      return { customers: out, total, staleBefore };
+      const byKana = (a, b) => (normText(a.kana || a.name) || '￿').localeCompare(normText(b.kana || b.name) || '￿', 'ja') || a.no - b.no;
+      const sorters = {
+        kana: byKana, // お名前順（ふりがながあればふりがなで）
+        visits: (a, b) => b.visits - a.visits || byKana(a, b), // ご来店回数順
+        recent: (a, b) => (b.last || '').localeCompare(a.last || '') || b.no - a.no,
+      };
+      const out = list.map((c) => this._brief(c)).sort(sorters[opt.sort] || sorters.recent).slice(0, limit);
+      const tags = [...new Set(this.db.customers.flatMap((c) => c.tags))].sort((a, b) => a.localeCompare(b, 'ja'));
+      return { customers: out, total, all: this.db.customers.length, staleBefore, tags };
     }
 
     getCustomer(id) {
@@ -183,7 +194,8 @@
       const name = str(input.name, 60), kana = str(input.kana, 60), phone = str(input.phone, 30).normalize('NFKC');
       if (!name && !normPhone(phone)) throw bad('お名前か電話番号のどちらかを入れてください');
       const tags = Array.isArray(input.tags) ? [...new Set(input.tags.map((t) => str(t, 20)).filter(Boolean))].slice(0, 10) : (cur ? cur.tags : []);
-      return { name, kana, phone, tags, allergy: str(input.allergy != null ? input.allergy : cur && cur.allergy, 200), memo: str(input.memo != null ? input.memo : cur && cur.memo, 1000) };
+      const keep = (k, max) => str(input[k] != null ? input[k] : cur && cur[k], max);
+      return { name, kana, phone, tags, company: keep('company', 60), anniv: keep('anniv', 60), allergy: keep('allergy', 200), memo: keep('memo', 1000) };
     }
 
     saveCustomer(input, id) {
@@ -247,6 +259,24 @@
       });
     }
 
+    // その時間に埋まっている席と、自動で割り当てる席（人数が定員の範囲に入る、いちばん小さい空き席）
+    availability(date, time, stayMin, guests, excludeId) {
+      if (!isDate(date)) throw bad('日付が正しくありません');
+      if (!isTime(time)) throw bad('時刻が正しくありません');
+      const s = toMin(time), e = s + int(stayMin, 15, 720, '滞在時間');
+      const busy = new Set();
+      for (const r of this.db.reservations) {
+        if (r.id === excludeId || r.date !== date || !ACTIVE.has(r.status)) continue;
+        const rs = toMin(r.time);
+        if (s < rs + r.stayMin && rs < e) r.tableIds.forEach((t) => busy.add(t));
+      }
+      const n = int(guests || 1, 1, 300, '人数');
+      const fits = this.db.tables.map((t, i) => ({ t, i }))
+        .filter(({ t }) => !busy.has(t.id) && (t.min || 1) <= n && n <= t.cap)
+        .sort((a, b) => a.t.cap - b.t.cap || a.i - b.i);
+      return { busy: [...busy], suggest: fits.length ? fits[0].t.id : null };
+    }
+
     saveReservation(input, id) {
       const d = this.db;
       const now = new Date().toISOString();
@@ -262,9 +292,12 @@
       if (courseId && !d.courses.some((c) => c.id === courseId)) throw bad('コースが見つかりません');
       const source = str(input.source, 20);
       if (source && !SOURCES.includes(source)) throw bad('予約の経路が正しくありません');
+      const guests = int(input.guests, 1, 300, '人数');
+      const kids = int(input.kids == null || input.kids === '' ? (cur ? cur.kids || 0 : 0) : input.kids, 0, 300, 'お子様の人数');
+      if (kids > guests) throw bad('お子様の人数が、全体の人数より多くなっています');
       const res = {
         id: cur ? cur.id : newId('r_'), date, time,
-        stayMin: int(input.stayMin, 15, 720, '滞在時間'), guests: int(input.guests, 1, 300, '人数'),
+        stayMin: int(input.stayMin, 15, 720, '滞在時間'), guests, kids,
         tableIds, customerId: cur ? cur.customerId : null, courseId, source, memo: str(input.memo, 500), status,
         createdAt: cur ? cur.createdAt : now, updatedAt: now,
       };
