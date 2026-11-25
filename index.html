@@ -35,90 +35,126 @@
 
 <!-- 本体 -->
 <div id="app" class="app" hidden>
-  <header class="bar">
-    <div class="bar-left">
-      <button id="btn-menu" class="icon-btn" aria-label="メニュー" aria-haspopup="true">☰</button>
-      <span class="brand" id="store-name">予約台帳</span>
-    </div>
-    <div class="bar-center" id="bar-date">
-      <button id="d-prev" class="icon-btn" aria-label="前の日">‹</button>
-      <button id="d-label" class="date-btn" aria-haspopup="true"></button>
-      <button id="d-today" class="today-btn">今日</button>
-      <button id="d-next" class="icon-btn" aria-label="次の日">›</button>
-    </div>
-    <div class="bar-right">
-      <div class="seg" id="view-seg" role="tablist" aria-label="表示の切り替え">
-        <button data-view="floor" title="テーブル配置">配置図</button>
-        <button data-view="time" title="タイムテーブル" class="on">タイム</button>
-        <button data-view="list" title="一覧表">一覧</button>
-      </div>
-      <button id="btn-print" class="icon-btn" aria-label="印刷" title="印刷（緊急時の控え）">⎙</button>
-      <button id="btn-new" class="plus-btn" aria-label="新規予約" title="新規予約">＋</button>
-    </div>
+  <header class="topbar">
+    <button id="btn-side" class="icon-btn" aria-label="メニューを開く・閉じる">☰</button>
+    <span class="brand"><span class="logo-dot"></span><span id="store-name">予約台帳</span> ▾</span>
   </header>
-  <nav id="menu" class="menu" hidden>
-    <button data-go="time">予約台帳</button>
-    <button data-go="customers">顧客台帳</button>
-    <button data-go="stats">集計</button>
-    <button data-go="settings">設定</button>
-    <hr>
-    <button id="btn-lock">ロックする</button>
-  </nav>
-  <div id="cal-pop" class="cal-pop" hidden><div class="cal" id="cal"></div></div>
-
-  <div class="sumbar" id="sumbar"></div>
-
-  <main>
-    <section id="v-time" class="view">
-      <div class="grid-wrap" id="grid-wrap"><div class="grid" id="grid"></div></div>
-    </section>
-    <section id="v-floor" class="view" hidden>
-      <div class="toolbar"><label>時刻 <select id="floor-time"></select></label><span class="muted" id="floor-note"></span></div>
-      <div id="floor" class="floor"></div>
-    </section>
-    <section id="v-list" class="view" hidden>
-      <div class="toolbar"><label class="chk"><input type="checkbox" id="list-cancel"> キャンセルも表示</label></div>
-      <div class="table-wrap"><table class="tbl daytbl" id="day-table"></table></div>
-    </section>
-    <section id="v-customers" class="view" hidden>
-      <div class="ct">
-        <aside class="ct-side">
-          <input type="search" id="c-q" placeholder="キーワード" aria-label="キーワード">
-          <p class="hint">お名前・ふりがな・会社名・電話番号・メモ・タグで探せます</p>
-          <div class="ct-h">お客様属性（タグ）</div>
-          <div id="c-tags" class="ct-tags"></div>
-          <div class="ct-h">来店回数</div>
-          <div class="ct-tags" id="c-visits"></div>
-          <div class="ct-h">保管期間</div>
-          <label class="chk"><input type="checkbox" id="c-stale"> 保管期間を過ぎたお客様</label>
-          <button id="c-reset" class="ghost wide">すべてリセット</button>
-          <button id="c-new" class="wide">＋ お客様を登録</button>
-        </aside>
-        <div class="ct-list">
-          <div class="ct-title" id="c-title">顧客台帳</div>
-          <div class="seg seg-full" id="c-sort">
-            <button data-sort="kana" class="on">お名前順</button>
-            <button data-sort="visits">ご来店回数順</button>
-            <button data-sort="recent">最近の来店順</button>
-          </div>
-          <ul id="c-list" class="clist"></ul>
+  <div class="layout">
+    <nav id="side" class="side" aria-label="メニュー">
+      <button data-go="home"><i>⌂</i>ホーム</button>
+      <button data-go="received"><i>✉</i>受付履歴</button>
+      <button data-go="ledger"><i>▦</i>予約台帳</button>
+      <button data-go="search"><i>⌕</i>予約を検索</button>
+      <button data-go="customers"><i>☺</i>顧客台帳</button>
+      <button data-go="analytics"><i>▥</i>分析</button>
+      <button class="grp" data-grp="tools"><i>⎙</i>ツール<span class="car">⌄</span></button>
+      <div class="sub" id="grp-tools">
+        <button data-go="print">印刷マネージャー</button>
+        <button data-go="csv">CSVダウンロード</button>
+        <button data-go="widget">ウェブ予約ウィジェット</button>
+      </div>
+      <button class="grp" data-grp="settings"><i>⚙</i>設定<span class="car">⌄</span></button>
+      <div class="sub" id="grp-settings">
+        <button data-go="settings">お店・テーブル・コース</button>
+        <button data-go="security">合言葉・バックアップ</button>
+        <button id="btn-lock">ロック（ログアウト）</button>
+      </div>
+    </nav>
+    <main id="main">
+      <!-- ホーム -->
+      <section id="v-home" class="view">
+        <h2 class="vt">ホーム</h2>
+        <div class="tb">
+          <div class="nav3"><button id="h-today">本日</button><button id="h-prev" aria-label="前の月">‹</button><button id="h-next" aria-label="次の月">›</button></div>
+          <span class="tb-title" id="h-title"></span><span class="sep"></span>
+          <div class="seg" id="h-mode"><button data-mode="memo">メモ</button><button data-mode="count" class="on">予約数</button></div>
         </div>
-        <div class="ct-detail" id="c-detail"><p class="muted">お客様を選ぶと、ここに詳しい情報が出ます。</p></div>
-      </div>
-    </section>
-    <section id="v-stats" class="view pad" hidden>
-      <div class="toolbar">
-        <label>期間 <input type="date" id="s-from"> 〜 <input type="date" id="s-to"></label>
-        <button id="s-go">集計</button>
-        <span class="sep"></span>
-        <button id="s-csv" title="お名前・電話番号は入りません">レジ連携用CSVを書き出す</button>
-      </div>
-      <div id="s-body"></div>
-    </section>
-    <section id="v-settings" class="view pad" hidden>
-      <div id="set-body" class="settings"></div>
-    </section>
-  </main>
+        <div class="mcal" id="h-cal"></div>
+        <div class="box gray" id="h-info"></div>
+      </section>
+
+      <!-- 受付履歴 -->
+      <section id="v-received" class="view" hidden>
+        <h2 class="vt">受付履歴</h2>
+        <div class="tabs" id="rc-tabs">
+          <button data-tab="all" class="on">すべて</button><button data-tab="new">新規</button><button data-tab="change">変更</button><button data-tab="cancel">取消</button><button data-tab="problem">問題のある予約</button>
+        </div>
+        <div class="table-wrap"><table class="tbl rtbl" id="rc-table"></table></div>
+        <button id="rc-more" class="wide ghost-line">過去分を取得</button>
+      </section>
+
+      <!-- 予約台帳 -->
+      <section id="v-ledger" class="view" hidden>
+        <div class="tb">
+          <div class="nav3"><button id="d-today">本日</button><button id="d-prev" aria-label="前の日">‹</button><button id="d-next" aria-label="次の日">›</button></div>
+          <label class="date-pick"><span class="cal-ic">📅</span><span id="d-label" class="tb-title"></span><input type="date" id="d-input" aria-label="日付を選ぶ"></label>
+          <span class="sep"></span>
+          <div class="seg" id="l-mode">
+            <button data-mode="list">予約リスト</button><button data-mode="time" class="on">タイムテーブル</button><button id="btn-new">新規予約</button><button id="btn-more" aria-label="その他">…</button>
+          </div>
+        </div>
+        <div class="morebox" id="morebox" hidden>
+          <label class="chk"><input type="checkbox" id="show-cancel"> キャンセルも表示</label>
+          <button id="btn-floor">テーブル配置図を見る</button>
+          <button id="btn-print-day">この日を印刷</button>
+        </div>
+        <div class="box info" id="day-info"></div>
+        <div id="l-time" class="grid-wrap"><div class="grid" id="grid"></div></div>
+        <div id="l-list" hidden><div class="table-wrap"><table class="tbl" id="day-table"></table></div></div>
+        <div id="l-floor" hidden><div class="tb"><label>時刻 <select id="floor-time"></select></label><span class="muted" id="floor-note"></span><span class="sep"></span><button id="floor-close">タイムテーブルに戻る</button></div><div id="floor" class="floor"></div></div>
+      </section>
+
+      <!-- 予約を検索 -->
+      <section id="v-search" class="view" hidden>
+        <h2 class="vt">予約を検索</h2>
+        <div class="searchbar"><input type="search" id="s-q" placeholder="検索ワード（#番号 で検索すると予約番号から検索できます）"><button id="s-go" aria-label="検索">⌕</button></div>
+        <div class="table-wrap" id="s-wrap" hidden><table class="tbl" id="s-table"></table></div>
+      </section>
+
+      <!-- 顧客台帳 -->
+      <section id="v-customers" class="view" hidden>
+        <h2 class="vt" id="c-vt">顧客台帳</h2>
+        <div class="tabs" id="c-tabs"><button data-tab="list" class="on">顧客一覧</button><button data-tab="hidden">非表示の顧客一覧</button><button data-tab="new">新規顧客</button></div>
+        <div id="c-listbox">
+          <div class="tb">
+            <div class="searchbar grow"><input type="search" id="c-q" placeholder="お名前・ふりがな・電話番号・会社名"><button id="c-go" aria-label="検索">⌕</button></div>
+            <div class="seg dark" id="c-sort"><button data-sort="kana">▾お名前</button><button data-sort="visits">▾来店回数</button></div>
+          </div>
+          <div class="table-wrap"><table class="tbl" id="c-table"></table></div>
+        </div>
+        <div id="c-form" hidden></div>
+      </section>
+
+      <!-- 分析 -->
+      <section id="v-analytics" class="view" hidden>
+        <div class="tabs scroll" id="a-tabs">
+          <button data-tab="top" class="on">トップ</button><button data-tab="counts">予約数</button><button data-tab="sources">予約経路</button><button data-tab="cancels">キャンセル</button><button data-tab="visits">来店回数</button><button data-tab="staff">担当者</button><button data-tab="course">コース</button><button data-tab="free">自由設定欄</button><button data-tab="tags">予約タグ</button><button data-tab="params">カスタムパラメーター</button>
+        </div>
+        <div id="a-body"></div>
+      </section>
+
+      <!-- 印刷マネージャー -->
+      <section id="v-print" class="view" hidden>
+        <h2 class="vt">印刷マネージャー</h2>
+        <div class="tabs" id="p-tabs"><button data-tab="list" class="on">☰ 予約リスト</button><button data-tab="time">▦ タイムテーブル</button></div>
+        <div class="pm" id="p-form"></div>
+      </section>
+
+      <!-- CSVダウンロード -->
+      <section id="v-csv" class="view" hidden><h2 class="vt">CSVダウンロード</h2><div id="csv-body"></div></section>
+      <!-- ウェブ予約ウィジェット -->
+      <section id="v-widget" class="view" hidden><h2 class="vt">ツール › ウェブ予約ウィジェット</h2><div id="widget-body"></div></section>
+      <!-- 設定 -->
+      <section id="v-settings" class="view" hidden><h2 class="vt">設定</h2><div id="set-body" class="settings"></div></section>
+      <section id="v-security" class="view" hidden><h2 class="vt">合言葉・バックアップ</h2><div id="sec-body" class="settings"></div></section>
+    </main>
+    <!-- 右側の入力欄（新規予約・予約の詳細・変更） -->
+    <aside id="panel" class="panel" hidden aria-label="予約">
+      <div class="pn-head"><span id="pn-title"></span><button id="pn-close" class="icon-btn" aria-label="閉じる">✕</button></div>
+      <div class="pn-body" id="pn-body"></div>
+      <div class="pn-foot" id="pn-foot"></div>
+    </aside>
+  </div>
 </div>
 
 <!-- ドラッグで動かした時の確認 -->
@@ -127,94 +163,15 @@
   <div class="mv-acts"><button id="mv-cancel">キャンセル</button><button id="mv-ok" class="primary">OK</button></div>
 </div>
 
-<!-- 新規予約（案内に沿って入れる） -->
-<dialog id="dlg-wiz" class="wiz">
-  <div class="wiz-top">
-    <span class="wiz-title">新規予約</span>
-    <button type="button" id="wiz-close" class="icon-btn" aria-label="閉じる">✕</button>
-  </div>
-  <div class="wiz-body" id="wiz-body"></div>
-  <div class="wiz-foot">
-    <span class="wiz-new">📞 新規予約</span>
-    <div class="steps" id="wiz-steps">
-      <button data-step="0">日時／人数</button><span>›</span>
-      <button data-step="1">テーブル選択</button><span>›</span>
-      <button data-step="2">詳細</button><span>›</span>
-      <button data-step="3">確認</button>
-    </div>
-    <div class="wiz-msg" id="wiz-msg" role="alert"></div>
-    <button type="button" id="wiz-back" class="round ghost" aria-label="戻る">‹</button>
-    <button type="button" id="wiz-next" class="round primary" aria-label="次へ">›</button>
-  </div>
+<!-- 確認の小窓 -->
+<dialog id="dlg-ask" class="ask">
+  <div class="ask-head"><b id="ask-title"></b><button id="ask-x" class="icon-btn" aria-label="閉じる">×</button></div>
+  <div class="ask-body" id="ask-body"></div>
+  <div class="ask-foot"><button id="ask-no">キャンセル</button><button id="ask-yes" class="primary-line">OK</button></div>
 </dialog>
 
-<!-- 予約の詳細・変更 -->
-<dialog id="dlg-res" class="dlg">
-  <form method="dialog" id="res-form" autocomplete="off">
-    <h2 id="res-title">予約の詳細</h2>
-    <div class="status-seg" id="res-status" role="group" aria-label="状態"></div>
-    <div class="row">
-      <label>日付<input type="date" name="date" required></label>
-      <label>時刻<input type="time" name="time" step="900" required></label>
-      <label>人数（合計）<input type="number" name="guests" min="1" max="300" required></label>
-      <label>うちお子様<input type="number" name="kids" min="0" max="300"></label>
-      <label>滞在（分）<input type="number" name="stayMin" min="15" max="720" step="15" required></label>
-    </div>
-    <fieldset class="cust-box">
-      <legend>お客様</legend>
-      <div class="row">
-        <label>電話番号<input type="tel" name="phone" inputmode="tel"></label>
-        <label>お名前<input type="text" name="name"></label>
-        <label>ふりがな<input type="text" name="kana"></label>
-      </div>
-      <div id="res-match" class="match"></div>
-      <label>アレルギー・苦手なもの<input type="text" name="allergy"></label>
-    </fieldset>
-    <div class="row">
-      <label>経路<select name="source"></select></label>
-      <label>コース<select name="courseId"></select></label>
-    </div>
-    <div class="tables-pick">
-      <div class="lbl">テーブル（複数選べます。選ばないとウェイティングリスト）</div>
-      <div id="res-tables" class="chips"></div>
-    </div>
-    <label>メモ（この予約について）<textarea name="memo" rows="2"></textarea></label>
-    <p id="res-err" class="err" role="alert"></p>
-    <div class="actions">
-      <button type="button" id="res-del" class="danger">削除</button>
-      <span class="sep"></span>
-      <button type="button" id="res-cancel">閉じる</button>
-      <button type="submit" class="primary">保存</button>
-    </div>
-  </form>
-</dialog>
-
-<!-- お客様の入力 -->
-<dialog id="dlg-cust" class="dlg">
-  <form method="dialog" id="cust-form" autocomplete="off">
-    <h2 id="cust-title">お客様</h2>
-    <div class="row">
-      <label>お名前<input type="text" name="name"></label>
-      <label>ふりがな<input type="text" name="kana"></label>
-      <label>電話番号<input type="tel" name="phone"></label>
-    </div>
-    <div class="row">
-      <label>会社名<input type="text" name="company"></label>
-      <label>記念日（例：誕生日 5/3）<input type="text" name="anniv"></label>
-    </div>
-    <label>タグ（読点「、」で区切る。例：VIP、常連、法人）<input type="text" name="tags"></label>
-    <label>アレルギー・苦手なもの<input type="text" name="allergy"></label>
-    <label>お客様のメモ（好み・接客のこと）<textarea name="memo" rows="3"></textarea></label>
-    <p class="hint">メモには必要なことだけを。健康や家族など踏み込んだ情報、住所は書かないのが安全です。</p>
-    <p id="cust-err" class="err" role="alert"></p>
-    <div class="actions">
-      <button type="button" id="cust-del" class="danger">このお客様の情報を消す</button>
-      <span class="sep"></span>
-      <button type="button" id="cust-cancel">閉じる</button>
-      <button type="submit" class="primary">保存</button>
-    </div>
-  </form>
-</dialog>
+<!-- 印刷用（画面には出ない） -->
+<div id="print-area" class="print-area"></div>
 
 <div id="toast" class="toast" role="status"><span id="toast-text"></span><button id="toast-act" hidden></button></div>
 <script src="core.js"></script>

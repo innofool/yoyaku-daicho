@@ -1,7 +1,7 @@
 'use strict';
 // 予約台帳の画面。データはこの端末の中だけで扱い、外へは送らない。
 // お客様の文字は必ず textContent で表示する（画面に仕込まれた文字が命令として動かないように）。
-// 画面の並び・予約の入れ方は、飲食店でよく使われる予約台帳（公開情報）の使い勝手に合わせている。
+// 画面の並びと操作は、飲食店でよく使われる予約台帳の管理画面（本人が見せてくれた画面写真）に合わせている。
 (function () {
   const $ = (s, r) => (r || document).querySelector(s);
   const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
@@ -19,6 +19,13 @@
     for (const k of kids.flat()) if (k != null && k !== false) el.append(k instanceof Node ? k : String(k));
     return el;
   }
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  function sv(tag, attrs, ...kids) {
+    const el = document.createElementNS(SVGNS, tag);
+    for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
+    for (const k of kids.flat()) if (k != null) el.append(k instanceof Node ? k : document.createTextNode(String(k)));
+    return el;
+  }
   const pad = (n) => String(n).padStart(2, '0');
   const fmtDate = (d) => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
   const parseDate = (s) => new Date(s + 'T00:00:00');
@@ -26,25 +33,26 @@
   const toMin = (t) => +t.slice(0, 2) * 60 + +t.slice(3);
   const toTime = (m) => pad(Math.floor(m / 60)) + ':' + pad(m % 60);
   const WD = ['日', '月', '火', '水', '木', '金', '土'];
-  const jpDate = (s) => { const d = parseDate(s); return (d.getMonth() + 1) + '月' + d.getDate() + '日（' + WD[d.getDay()] + '）'; };
-  const STATUS = { booked: '予約', seated: '来店中', left: '退店', cancel: 'キャンセル', noshow: '無断キャンセル' };
+  const jpDate = (s) => { const d = parseDate(s); return d.getFullYear() + '年' + (d.getMonth() + 1) + '月' + d.getDate() + '日(' + WD[d.getDay()] + ')'; };
+  const mdw = (s) => { const d = parseDate(s); return (d.getMonth() + 1) + '月' + d.getDate() + '日(' + WD[d.getDay()] + ')'; };
+  const stamp = (iso) => { const d = new Date(iso); return mdw(fmtDate(d)) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()); };
+  const ymLabel = (ym) => +ym.slice(0, 4) + '年' + +ym.slice(5, 7) + '月';
+  const STATUS = { booked: '予約', seated: '来店中', left: '退店', cancel: '予約取消', noshow: 'No Show' };
+  const EV = { new: '新規', change: '変更', cancel: '取消' };
   const ACTIVE = new Set(['booked', 'seated', 'left']);
-  const LEDGER_VIEWS = new Set(['time', 'floor', 'list']);
-  const AREA_COLORS = ['#f59e0b', '#10b981', '#3b82f6', '#a855f7', '#ef4444', '#14b8a6', '#84cc16', '#ec4899'];
+  const COLORS = ['#1d6fd8', '#22a06b', '#f59e0b', '#dc2626', '#7c3aed', '#0891b2', '#db2777', '#65a30d', '#9ca3af', '#a16207'];
   const coarse = matchMedia('(pointer: coarse)').matches;
+  const wide = () => matchMedia('(min-width: 1001px)').matches;
   const yen = (n) => '¥' + Number(n || 0).toLocaleString('ja-JP');
 
-  const S = { today: '', date: '', calYm: '', boot: null, day: [], view: 'time', ledgerView: 'time', custSel: null, custSort: 'kana', custTag: '', custVisits: 0, floorTime: '' };
+  const S = { today: '', date: '', view: 'ledger', lmode: 'time', boot: null, day: [], homeYm: '', homeMode: 'count', rcTab: 'all', rcLimit: 10, cTab: 'list', cSort: 'kana', aTab: 'top', ap: {}, pTab: 'list' };
 
   // ---------- 台帳とのやりとり（すべてこの端末の中で完結する） ----------
   const C = window.YoyakuCore, V = window.YoyakuVault;
   const vault = new V.Vault(V.idbStorage());
   let L = null; // 開いている間だけの台帳（ロックすると消える）
   let saving = Promise.resolve();
-  function persist() {
-    saving = saving.catch(() => {}).then(() => vault.save(L.db));
-    return saving;
-  }
+  function persist() { saving = saving.catch(() => {}).then(() => vault.save(L.db)); return saving; }
   async function api(method, url, body) {
     if (!L) { showGate(); throw new Error('ロックされています'); }
     touch();
@@ -57,18 +65,22 @@
     else if (p === '/reservations' && method === 'POST') out = L.saveReservation(b);
     else if ((m = /^\/reservations\/(r_[a-f0-9]{16})(\/status)?$/.exec(p))) {
       if (method === 'PUT' && !m[2]) out = L.saveReservation(b, m[1]);
-      else if (method === 'PUT') out = L.setStatus(m[1], b.status);
+      else if (method === 'PUT') out = L.setStatus(m[1], b.status, b.staff);
       else if (method === 'DELETE') out = L.deleteReservation(m[1]);
-    } else if (p === '/availability' && method === 'GET') out = L.availability(q.date, q.time, q.stayMin, q.guests, q.exclude);
+    } else if (p === '/availability' && method === 'GET') out = L.availability(q.date, q.time, q.stayMin, q.guests, q.exclude, q.resetMin);
+    else if (p === '/home' && method === 'GET') out = L.homeMonth(q.ym);
     else if (p === '/month' && method === 'GET') out = L.month(q.ym);
-    else if (p === '/customers' && method === 'GET') out = L.listCustomers({ q: q.q, stale: q.stale === '1', limit: q.limit, sort: q.sort, tag: q.tag, minVisits: q.minVisits });
+    else if (p === '/dayinfo' && method === 'PUT') out = L.setDayInfo(b.date, b.text);
+    else if (p === '/received' && method === 'GET') out = L.received(q.tab, q.limit);
+    else if (p === '/search' && method === 'GET') out = L.search(q.q);
+    else if (p === '/analytics' && method === 'GET') out = L.analytics(q.kind, q);
+    else if (p === '/customers' && method === 'GET') out = L.listCustomers({ q: q.q, stale: q.stale === '1', hidden: q.hidden === '1', limit: q.limit, sort: q.sort, tag: q.tag, minVisits: q.minVisits });
     else if (p === '/customers' && method === 'POST') out = L.saveCustomer(b);
     else if ((m = /^\/customers\/(c_[a-f0-9]{16})$/.exec(p))) {
       if (method === 'GET') out = L.getCustomer(m[1]);
       else if (method === 'PUT') out = L.saveCustomer(b, m[1]);
       else if (method === 'DELETE') out = L.deleteCustomer(m[1]);
-    } else if (p === '/stats' && method === 'GET') out = L.stats(q.from, q.to);
-    else if (p === '/log' && method === 'GET') out = { log: L.log(300) };
+    } else if (p === '/log' && method === 'GET') out = { log: L.log(300) };
     if (out === undefined) throw new Error('見つかりません');
     if (method !== 'GET' && !out.conflicts) {
       try { await persist(); } catch (e) { throw new Error('保存できませんでした。端末の空き容量を確かめてください（' + e.message + '）'); }
@@ -110,12 +122,33 @@
   function toast(msg, bad, action) {
     const t = $('#toast'), b = $('#toast-act');
     $('#toast-text').textContent = msg; t.className = 'toast show' + (bad ? ' bad' : '');
-    b.hidden = !action;
-    b.onclick = null;
+    b.hidden = !action; b.onclick = null;
     if (action) { b.textContent = action.label; b.onclick = () => { t.className = 'toast'; action.fn(); }; }
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.className = 'toast'; }, action ? 7000 : bad ? 4000 : 2000);
   }
   const fail = (e) => toast(e.message || String(e), true);
+
+  // 確認の小窓（OKなら true、入力欄つきなら入力した文字）
+  function ask(title, body, opt) {
+    opt = opt || {};
+    const d = $('#dlg-ask');
+    $('#ask-title').textContent = title;
+    const box = $('#ask-body'); box.replaceChildren();
+    let ta = null;
+    if (opt.input != null) { ta = h('textarea', { value: opt.input, 'aria-label': title }); box.append(ta); }
+    else box.textContent = body;
+    $('#ask-yes').textContent = opt.ok || 'OK';
+    $('#ask-no').textContent = opt.cancel || 'キャンセル';
+    return new Promise((resolve) => {
+      const done = (v) => { d.close(); $('#ask-yes').onclick = null; $('#ask-no').onclick = null; $('#ask-x').onclick = null; resolve(v); };
+      $('#ask-yes').onclick = () => done(ta ? ta.value : true);
+      $('#ask-no').onclick = () => done(ta ? null : false);
+      $('#ask-x').onclick = () => done(ta ? null : false);
+      d.oncancel = (e) => { e.preventDefault(); done(ta ? null : false); };
+      d.showModal();
+      if (ta) ta.focus();
+    });
+  }
 
   // ---------- 合言葉 ----------
   let gateMode = 'unlock';
@@ -126,7 +159,6 @@
     }
     S.today = C.localDate();
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => { /* なくても台帳は使える */ });
-    // 端末の空きが減っても、ブラウザが勝手に台帳を消さないよう頼む
     if (navigator.storage && navigator.storage.persist) { try { S.persisted = await navigator.storage.persist(); } catch (e) { S.persisted = false; } }
     gateMode = (await vault.exists()) ? 'unlock' : 'setup';
     showGate();
@@ -134,7 +166,8 @@
   function showGate() {
     $('#app').hidden = true; $('#gate').hidden = false;
     $$('dialog[open]').forEach((d) => d.close());
-    $('#movebar').hidden = true; $('#menu').hidden = true; $('#cal-pop').hidden = true;
+    $('#movebar').hidden = true;
+    closePanel(true);
     const setup = gateMode === 'setup';
     $('#gate-pass2-wrap').hidden = !setup;
     $('#gate-pass2').required = setup;
@@ -175,135 +208,152 @@
     $('#gate').hidden = true; $('#app').hidden = false;
     $('#store-name').textContent = S.boot.settings.storeName || '予約台帳';
     if (!S.date) S.date = S.today;
-    S.calYm = S.date.slice(0, 7);
-    fillSelects();
+    if (!S.homeYm) S.homeYm = S.today.slice(0, 7);
     show(S.view);
   }
 
-  // ---------- 上の帯・メニュー・画面の切り替え ----------
-  $('#btn-menu').addEventListener('click', (e) => { e.stopPropagation(); $('#menu').hidden = !$('#menu').hidden; $('#cal-pop').hidden = true; });
-  document.addEventListener('click', (e) => {
-    if (!$('#menu').hidden && !e.target.closest('#menu')) $('#menu').hidden = true;
-    if (!$('#cal-pop').hidden && !e.target.closest('#cal-pop') && !e.target.closest('#d-label')) $('#cal-pop').hidden = true;
+  // ---------- 左のメニュー・画面の切り替え ----------
+  $('#btn-side').addEventListener('click', () => {
+    if (wide()) document.body.classList.toggle('side-closed');
+    else document.body.classList.toggle('side-open');
   });
-  $$('#menu [data-go]').forEach((b) => b.addEventListener('click', () => { $('#menu').hidden = true; show(b.dataset.go === 'time' ? S.ledgerView : b.dataset.go); }));
-  $('#btn-lock').addEventListener('click', () => { $('#menu').hidden = true; lockNow('ロック'); });
-  $$('#view-seg button').forEach((b) => b.addEventListener('click', () => show(b.dataset.view)));
-  $('#btn-print').addEventListener('click', () => { if (!LEDGER_VIEWS.has(S.view)) show(S.ledgerView); setTimeout(() => window.print(), 300); });
-  $('#btn-new').addEventListener('click', () => openWizard({ date: LEDGER_VIEWS.has(S.view) ? S.date : S.today }));
+  $$('#side [data-go]').forEach((b) => b.addEventListener('click', () => { if (!wide()) document.body.classList.remove('side-open'); show(b.dataset.go); }));
+  $$('#side .grp').forEach((b) => b.addEventListener('click', () => { $('#grp-' + b.dataset.grp).classList.toggle('open'); }));
+  $('#btn-lock').addEventListener('click', () => lockNow('ロック'));
 
   function show(view) {
+    if (view !== 'ledger' && P) closePanel(true);
     S.view = view;
-    if (LEDGER_VIEWS.has(view)) S.ledgerView = view;
-    const ledger = LEDGER_VIEWS.has(view);
-    $$('#view-seg button').forEach((b) => b.classList.toggle('on', b.dataset.view === view));
-    $('#bar-date').style.visibility = ledger ? 'visible' : 'hidden';
-    $('#sumbar').hidden = !ledger;
-    $$('.view').forEach((v) => { v.hidden = v.id !== 'v-' + view; });
-    const run = ledger ? loadDay : ({ customers: loadCustomers, stats: initStats, settings: renderSettings })[view];
+    $$('#side [data-go]').forEach((b) => b.classList.toggle('on', b.dataset.go === view));
+    $$('main > .view').forEach((v) => { v.hidden = v.id !== 'v-' + view; });
+    if (['print', 'csv', 'widget'].includes(view)) $('#grp-tools').classList.add('open');
+    if (['settings', 'security'].includes(view)) $('#grp-settings').classList.add('open');
+    const run = { home: renderHome, received: renderReceived, ledger: loadDay, search: renderSearch, customers: renderCustomers, analytics: renderAnalytics, print: renderPrint, csv: renderCsv, widget: renderWidget, settings: renderSettings, security: renderSecurity }[view];
+    $('#main').scrollTop = 0;
     run().catch(fail);
-  }
-  function refresh() { show(S.view); }
-
-  // ---------- 日付 ----------
-  $('#d-prev').addEventListener('click', () => goDate(addDays(S.date, -1)));
-  $('#d-next').addEventListener('click', () => goDate(addDays(S.date, 1)));
-  $('#d-today').addEventListener('click', () => goDate(S.today));
-  $('#d-label').addEventListener('click', (e) => {
-    e.stopPropagation();
-    const pop = $('#cal-pop');
-    pop.hidden = !pop.hidden; $('#menu').hidden = true;
-    if (!pop.hidden) { S.calYm = S.date.slice(0, 7); api('GET', '/month?ym=' + S.calYm).then((r) => { S.month = r; renderCal(); }).catch(fail); }
-  });
-  function goDate(d) { S.date = d; S.calYm = d.slice(0, 7); $('#cal-pop').hidden = true; if (!LEDGER_VIEWS.has(S.view)) show(S.ledgerView); else loadDay().catch(fail); }
-
-  function renderCal() {
-    const cal = $('#cal'); cal.replaceChildren();
-    const [y, m] = S.calYm.split('-').map(Number);
-    const first = new Date(y, m - 1, 1);
-    const moveCal = (n) => { const d = new Date(y, m - 1 + n, 1); S.calYm = d.getFullYear() + '-' + pad(d.getMonth() + 1); api('GET', '/month?ym=' + S.calYm).then((r) => { S.month = r; renderCal(); }).catch(fail); };
-    cal.append(h('div', { class: 'cap' }, h('button', { text: '‹', 'aria-label': '前の月', onclick: (e) => { e.stopPropagation(); moveCal(-1); } }), h('span', { text: y + '年' + m + '月' }), h('button', { text: '›', 'aria-label': '次の月', onclick: (e) => { e.stopPropagation(); moveCal(1); } })));
-    WD.forEach((w, i) => cal.append(h('div', { class: 'wd' + (i === 0 ? ' sun' : i === 6 ? ' sat' : ''), text: w })));
-    const start = new Date(first); start.setDate(1 - first.getDay());
-    for (let i = 0; i < 42; i++) {
-      const d = new Date(start); d.setDate(start.getDate() + i);
-      if (i >= 35 && d.getMonth() !== m - 1) break;
-      const ds = fmtDate(d), info = (S.month && S.month.days[ds]) || null;
-      cal.append(h('button', {
-        class: 'd' + (d.getMonth() !== m - 1 ? ' other' : '') + (ds === S.today ? ' today' : '') + (ds === S.date ? ' sel' : '') + (d.getDay() === 0 ? ' sun' : d.getDay() === 6 ? ' sat' : ''),
-        title: info ? info.groups + '組 ' + info.guests + '名' : '', onclick: () => goDate(ds),
-      }, h('span', { class: 'n', text: d.getDate() }), h('span', { class: 'c', text: info && info.groups ? info.groups + '組' : '' })));
-    }
-  }
-
-  // ---------- その日の予約 ----------
-  async function loadDay() {
-    const r = await api('GET', '/reservations?from=' + S.date + '&to=' + S.date);
-    S.day = r.reservations;
-    $('#d-label').textContent = jpDate(S.date);
-    $('#d-today').classList.toggle('is-today', S.date === S.today);
-    renderSum();
-    if (S.view === 'time') renderTime();
-    else if (S.view === 'floor') renderFloor();
-    else renderList();
-  }
-
-  function renderSum() {
-    const act = S.day.filter((r) => ACTIVE.has(r.status));
-    const g = (list) => list.reduce((a, r) => a + r.guests, 0);
-    const le = toMin(S.boot.settings.lunchEnd);
-    const lunch = act.filter((r) => toMin(r.time) < le), dinner = act.filter((r) => toMin(r.time) >= le);
-    const item = (k, v) => h('span', null, k + ' ', h('b', { text: v }));
-    const box = $('#sumbar'); box.replaceChildren(
-      item('予約', act.length + '組 ' + g(act) + '名'), item('昼', lunch.length + '組 ' + g(lunch) + '名'), item('夜', dinner.length + '組 ' + g(dinner) + '名'),
-      item('来店済み', act.filter((r) => r.status !== 'booked').length + '組'), item('キャンセル', S.day.filter((r) => !ACTIVE.has(r.status)).length + '組'),
-      item('ウェイティング', act.filter((r) => !r.tableIds.length).length + '組'));
-    const lastB = L && L.db.lastBackupAt;
-    if (L && L.db.reservations.length && (!lastB || Date.now() - Date.parse(lastB) > 7 * 86400000)) {
-      box.append(h('button', { class: 'warn-btn', text: lastB ? 'バックアップが7日以上前です' : 'バックアップがまだありません', onclick: () => show('settings') }));
-    }
   }
 
   function courseName(id) { const c = S.boot.courses.find((x) => x.id === id); return c ? c.name : ''; }
-  function tableNames(ids) { return ids.map((id) => (S.boot.tables.find((t) => t.id === id) || {}).name).filter(Boolean).join('・'); }
-  function capText(t) { return (t.min || 1) === t.cap ? String(t.cap) : (t.min || 1) + '〜' + t.cap; }
-  function custName(c) { return c ? (c.name || c.phone || 'お名前なし') : 'お名前なし'; }
-  function sama(c) { return c && c.name ? c.name + ' 様' : custName(c); }
-  function areaColor(area) { const areas = [...new Set(S.boot.tables.map((t) => t.area))]; return AREA_COLORS[Math.max(0, areas.indexOf(area)) % AREA_COLORS.length]; }
+  function tableNames(ids) { return ids.map((id) => (S.boot.tables.find((t) => t.id === id) || {}).name).filter(Boolean).join(', '); }
+  function capText(t) { return (t.min || 1) === t.cap ? t.cap + ' 名' : (t.min || 1) + '-' + t.cap + ' 名'; }
+  function sama(c) { return c ? (c.name || c.kana || c.phone || 'お名前なし') + ' 様' : 'お名前なし'; }
+  function guestsText(r) { return (r.guestsMin && r.guestsMin !== r.guests ? r.guestsMin + '-' : '') + r.guests + '名様'; }
+  function smokeIcon(t) { return t.smoke === '喫煙' ? '🚬' : t.smoke === '禁煙' ? '🚭' : ''; }
   function isVip(c) { return c && c.tags.some((t) => /^vip$/i.test(t)); }
+
+  // ---------- ホーム（月のカレンダー） ----------
+  $('#h-today').addEventListener('click', () => { S.homeYm = S.today.slice(0, 7); renderHome().catch(fail); });
+  $('#h-prev').addEventListener('click', () => { S.homeYm = C.ymAdd(S.homeYm, -1); renderHome().catch(fail); });
+  $('#h-next').addEventListener('click', () => { S.homeYm = C.ymAdd(S.homeYm, 1); renderHome().catch(fail); });
+  $$('#h-mode button').forEach((b) => b.addEventListener('click', () => { S.homeMode = b.dataset.mode; renderHome().catch(fail); }));
+  async function renderHome() {
+    const r = await api('GET', '/home?ym=' + S.homeYm);
+    $('#h-title').textContent = ymLabel(S.homeYm);
+    $$('#h-mode button').forEach((b) => b.classList.toggle('on', b.dataset.mode === S.homeMode));
+    const cal = $('#h-cal'); cal.replaceChildren();
+    WD.forEach((w, i) => cal.append(h('div', { class: 'wd' + (i === 0 ? ' sun' : i === 6 ? ' sat' : ''), text: w })));
+    for (let s = r.start; s <= r.end; s = addDays(s, 1)) {
+      const d = r.days[s], wd = parseDate(s).getDay();
+      const cell = h('button', { class: 'day' + (wd === 0 ? ' sun' : wd === 6 ? ' sat' : '') + (s.slice(0, 7) !== S.homeYm ? ' other' : '') + (s === S.today ? ' today' : ''), onclick: () => { S.date = s; show('ledger'); } },
+        h('span', { class: 'dn', text: +s.slice(8) }));
+      if (S.homeMode === 'count') {
+        cell.append(h('span', { class: 'cnt', text: '☀ ' + d.lunch.groups + '組 (' + d.lunch.guests + '名)' }), h('span', { class: 'cnt', text: '☾ ' + d.dinner.groups + '組 (' + d.dinner.guests + '名)' }));
+      } else if (d.info) cell.append(h('span', { class: 'memo', text: d.info }));
+      cal.append(cell);
+    }
+    const ti = (r.days[S.today] && r.days[S.today].info) || L.db.dayInfo[S.today] || '';
+    $('#h-info').replaceChildren(h('b', { text: '本日の情報（' + mdw(S.today) + '）' }), h('div', { text: ti || '情報はありません', style: 'white-space:pre-wrap;margin-top:6px' }));
+  }
+
+  // ---------- 受付履歴 ----------
+  $$('#rc-tabs button').forEach((b) => b.addEventListener('click', () => { S.rcTab = b.dataset.tab; S.rcLimit = 10; renderReceived().catch(fail); }));
+  $('#rc-more').addEventListener('click', () => { S.rcLimit += 10; renderReceived().catch(fail); });
+  async function renderReceived() {
+    $$('#rc-tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.rcTab));
+    const r = await api('GET', '/received?tab=' + S.rcTab + '&limit=' + S.rcLimit);
+    const t = $('#rc-table'); t.replaceChildren();
+    t.append(h('thead', null, h('tr', null, ['更新日', '来店日時', 'ご予約者', '人数, テーブル', '備考'].map((x) => h('th', { text: x })))));
+    const tb = h('tbody');
+    for (const row of r.rows) {
+      const x = row.reservation;
+      tb.append(h('tr', { class: 'click', onclick: () => openReservation(x) },
+        h('td', null, h('div', { text: stamp(row.t) + ' ' + (row.type === 'new' ? '受付' : row.type === 'cancel' ? '取消' : '変更') }), row.staff ? h('div', { class: 'muted', text: row.staff }) : null, h('span', { class: 'badge ' + row.type, text: EV[row.type] })),
+        h('td', { text: mdw(x.date) + ' ' + x.time }),
+        h('td', null, h('b', { class: 'who', text: sama(x.customer) })),
+        h('td', null, h('div', { text: guestsText(x) }), h('div', { class: 'muted', text: tableNames(x.tableIds) || 'ウェイティング' })),
+        h('td', null, x.tags.map((g) => h('div', { class: 'badge tag', text: g })), x.flags.map((f) => h('div', null, h('span', { class: 'badge flag' + (f === '営業時間外' ? '' : ' f2'), text: f }))))));
+    }
+    if (!r.rows.length) tb.append(h('tr', null, h('td', { colspan: 5, class: 'muted', text: '該当する受付はありません' })));
+    t.append(tb);
+    $('#rc-more').hidden = r.total <= r.rows.length;
+  }
+
+  // ---------- 予約台帳 ----------
+  $('#d-prev').addEventListener('click', () => goDate(addDays(S.date, -1)));
+  $('#d-next').addEventListener('click', () => goDate(addDays(S.date, 1)));
+  $('#d-today').addEventListener('click', () => goDate(S.today));
+  $('#d-input').addEventListener('change', (e) => { if (e.target.value) goDate(e.target.value); });
+  $$('#l-mode [data-mode]').forEach((b) => b.addEventListener('click', () => { S.lmode = b.dataset.mode; S.floor = false; loadDay().catch(fail); }));
+  $('#btn-new').addEventListener('click', () => openForm(null, { date: S.date }));
+  $('#btn-more').addEventListener('click', () => { $('#morebox').hidden = !$('#morebox').hidden; });
+  $('#show-cancel').addEventListener('change', () => renderDayViews());
+  $('#btn-floor').addEventListener('click', () => { S.floor = true; $('#morebox').hidden = true; renderDayViews(); });
+  $('#floor-close').addEventListener('click', () => { S.floor = false; renderDayViews(); });
+  $('#btn-print-day').addEventListener('click', () => { S.printDate = S.date; show('print'); });
+  function goDate(d) {
+    S.date = d;
+    if (P && P.f) { P.f.date = d; renderPanel(); }
+    loadDay().catch(fail);
+  }
+
+  async function loadDay() {
+    const r = await api('GET', '/reservations?from=' + S.date + '&to=' + S.date);
+    S.day = r.reservations; S.dayInfo = r.info;
+    $('#d-label').textContent = jpDate(S.date);
+    $('#d-input').value = S.date;
+    $$('#l-mode [data-mode]').forEach((b) => b.classList.toggle('on', b.dataset.mode === S.lmode));
+    const info = $('#day-info');
+    info.replaceChildren(h('span', { class: 'ic', text: 'ⓘ' }), h('div', { class: 'txt' }, h('span', { class: 'ttl', text: '本日の情報' }), r.info || '情報はありません'),
+      h('button', { class: 'link', text: '変更', onclick: editDayInfo }));
+    renderDayViews();
+  }
+  async function editDayInfo() {
+    const v = await ask('本日の情報（' + mdw(S.date) + '）', '', { input: S.dayInfo || '', ok: '保存' });
+    if (v == null) return;
+    try { await api('PUT', '/dayinfo', { date: S.date, text: v }); toast('保存しました'); loadDay().catch(fail); } catch (e) { fail(e); }
+  }
+  function renderDayViews() {
+    $('#l-time').hidden = S.lmode !== 'time' || S.floor;
+    $('#l-list').hidden = S.lmode !== 'list' || S.floor;
+    $('#l-floor').hidden = !S.floor;
+    if (S.floor) renderFloor();
+    else if (S.lmode === 'time') renderTime();
+    else renderList();
+  }
 
   function hoursRange(list) {
     const st = S.boot.settings;
     let s = Math.floor(toMin(st.open) / 60) * 60, e = Math.ceil(toMin(st.close) / 60) * 60;
     for (const r of list) { s = Math.min(s, Math.floor(toMin(r.time) / 60) * 60); e = Math.max(e, Math.ceil((toMin(r.time) + r.stayMin) / 60) * 60); }
+    if (P && P.f && P.f.start && P.f.end) { s = Math.min(s, Math.floor(toMin(P.f.start) / 60) * 60); e = Math.max(e, Math.ceil(toMin(P.f.end) / 60) * 60); }
     return [s, Math.min(e, 30 * 60)];
   }
   function slotW() { return parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--slot')) || 44; }
 
-  function overlapIds(list) {
-    const over = new Set();
-    const act = list.filter((r) => ACTIVE.has(r.status));
-    for (let i = 0; i < act.length; i++) for (let j = i + 1; j < act.length; j++) {
-      const a = act[i], b = act[j];
-      if (!a.tableIds.some((t) => b.tableIds.includes(t))) continue;
-      const as = toMin(a.time), bs = toMin(b.time);
-      if (as < bs + b.stayMin && bs < as + a.stayMin) { over.add(a.id); over.add(b.id); }
-    }
-    return over;
-  }
-
-  // ---------- タイムテーブル ----------
-  // 表の骨組み（席の列・時間の見出し）を作る。台帳と、新規予約のテーブル選択で使い回す
-  function buildGrid(box, list, opt) {
+  function renderTime() {
+    const showCancel = $('#show-cancel').checked;
+    const list = S.day.filter((r) => showCancel || ACTIVE.has(r.status));
     const [s, e] = hoursRange(list);
     const slot = slotW(), slots = (e - s) / 30, px = (m) => ((m - s) / 30) * slot;
     const st = S.boot.settings, o0 = toMin(st.open), o1 = toMin(st.close);
-    box.replaceChildren();
-    const head = h('div', { class: 'g-head' }, h('div', { class: 'g-corner' }, h('span', { text: 'テーブル' }), h('span', { text: '定員' })));
-    for (let m = s; m < e; m += 60) head.append(h('div', { class: 'g-hour', text: (m / 60) + ':00' }));
-    box.append(head);
-    const rows = [{ id: '', name: 'ウェイティングリスト', waiting: true }, ...S.boot.tables];
-    let lastArea = null;
+    const grid = $('#grid'); grid.replaceChildren();
+    const head = h('div', { class: 'g-head' }, h('div', { class: 'g-corner', text: 'テーブル' }));
+    for (let m = s; m < e; m += 60) head.append(h('div', { class: 'g-hour', text: toTime(m) }));
+    grid.append(head);
+    const picking = P && P.f && (P.step === 'form');
+    const rows = S.boot.tables.slice();
+    const waiting = list.filter((r) => !r.tableIds.length);
+    if (waiting.length) rows.unshift({ id: '', name: 'ウェイティング', waiting: true });
     const rowEls = [];
     for (const t of rows) {
       const cells = h('div', { class: 'g-cells', style: 'width:' + slots * slot + 'px' });
@@ -311,63 +361,68 @@
         const tm = s + i * 30;
         cells.append(h('div', { class: 'g-cell' + (tm % 60 === 0 ? ' h' : '') + (tm >= o0 && tm < o1 ? ' open' : ''), 'data-tm': tm }));
       }
-      const top = !t.waiting && lastArea !== null && t.area !== lastArea;
-      if (!t.waiting) lastArea = t.area;
-      const name = h('div', { class: 'g-name', style: t.waiting ? '' : '--area:' + areaColor(t.area) },
-        h('span', { class: 'tn', text: t.name, title: t.name + (t.area ? '（' + t.area + '）' : '') }), h('span', { class: 'tc', text: t.waiting ? '' : capText(t) }));
-      const row = h('div', { class: 'g-row' + (t.waiting ? ' waiting' : '') + (top ? ' area-top' : ''), 'data-tid': t.id }, name, cells);
+      if (!t.waiting && !picking) {
+        cells.addEventListener('click', (ev) => {
+          const cell = ev.target.closest('.g-cell'); if (!cell) return;
+          openForm(null, { date: S.date, time: toTime(+cell.dataset.tm), tableIds: [t.id] });
+        });
+      }
+      const row = h('div', { class: 'g-row' + (t.waiting ? ' waiting' : ''), 'data-tid': t.id },
+        h('div', { class: 'g-name' }, h('span', { class: 'tn' }, h('span', { class: 'smk', text: t.waiting ? '' : smokeIcon(t) }), t.name), h('span', { class: 'tc', text: t.waiting ? '' : capText(t) })), cells);
       rowEls.push({ t, row, cells });
-      box.append(row);
-      if (opt && opt.onRow) opt.onRow(t, row, cells);
+      grid.append(row);
     }
-    if (S.date === S.today || (opt && opt.date === S.today)) {
+    const g = { s, e, slot, px, rowEls };
+    for (const { t, cells } of rowEls) {
+      const mine = t.waiting ? waiting : list.filter((r) => r.tableIds.includes(t.id));
+      for (const r of mine) {
+        if (picking && P.r && r.id === P.r.id) continue; // 変更中の予約は、選び直す枠で表す
+        const el = blockEl(r, px, slot);
+        if (!picking) attachDrag(el, r, t.id, g);
+        cells.append(el);
+      }
+      if (picking && !t.waiting) cells.append(pickSlot(t, px, slot));
+    }
+    if (S.date === S.today) {
       const now = new Date(), nm = now.getHours() * 60 + now.getMinutes();
       if (nm >= s && nm <= e) for (const { cells } of rowEls) cells.append(h('div', { class: 'g-now', style: 'left:' + px(nm) + 'px' }));
     }
-    return { s, e, slot, px, rowEls };
+    S.grid = g;
+    const wrap = $('#l-time');
+    const focus = picking && P.f.start ? toMin(P.f.start) : (S.date === S.today ? new Date().getHours() * 60 : toMin(st.open));
+    if (picking || S.scrollKey !== S.date) { wrap.scrollLeft = Math.max(0, px(focus) - 2 * slot); S.scrollKey = S.date; }
   }
 
-  function blockEl(r, px, slot, over) {
+  function blockEl(r, px, slot) {
     const c = r.customer;
-    const vc = c && c.visits ? h('span', { class: 'vc', text: c.visits, title: '来店回数' }) : null;
     const el = h('div', {
-      class: 'blk ' + r.status + (over && over.has(r.id) ? ' over' : ''),
+      class: 'blk ' + r.status + (r.flags.includes('重複') ? ' over' : '') + (P && P.r && P.r.id === r.id ? ' sel' : ''),
       style: 'left:' + px(toMin(r.time)) + 'px;width:' + Math.max(slot - 4, (r.stayMin / 30) * slot - 3) + 'px',
-      title: r.time + '〜' + toTime(toMin(r.time) + r.stayMin) + ' ' + r.guests + '名様 ' + sama(c) + (r.memo ? ' ' + r.memo : '') + (over && over.has(r.id) ? '（席が重なっています）' : ''),
-    }, h('div', { class: 't', text: r.time + ' - ' + r.guests + '名様' + (r.kids ? '（子' + r.kids + '）' : '') + (courseName(r.courseId) ? ' ' + courseName(r.courseId) : '') }),
-    h('div', { class: 'n' }, sama(c), vc, isVip(c) ? h('span', { class: 'badge vip', text: 'VIP' }) : null, c && c.allergy ? h('span', { class: 'badge', text: '⚠' }) : null));
+      title: r.time + '-' + toTime(toMin(r.time) + r.stayMin) + ' ' + guestsText(r) + ' ' + sama(c) + (r.flags.length ? '（' + r.flags.join('・') + '）' : ''),
+    },
+    r.flags.length ? h('span', { class: 'warn-ic', text: '!' }) : null,
+    h('div', { class: 'bi' }, h('div', { class: 't', text: r.time + ' - ' + guestsText(r) }), h('div', { class: 'n' }, sama(c), c ? h('span', { class: 'vc', text: c.visits }) : null)),
+    r.tags.length ? h('span', { class: 'tg', text: '🏷' }) : null);
     return el;
   }
 
-  function renderTime() {
-    const showCancel = false;
-    const list = S.day.filter((r) => showCancel || ACTIVE.has(r.status));
-    const over = overlapIds(S.day);
-    const g = buildGrid($('#grid'), list, {
-      onRow: (t, row, cells) => {
-        cells.addEventListener('click', (ev) => {
-          const cell = ev.target.closest('.g-cell'); if (!cell) return;
-          openWizard({ date: S.date, time: toTime(+cell.dataset.tm), tableIds: t.id ? [t.id] : [], fromGrid: true });
-        });
-      },
+  // テーブルを選ぶ枠（右の入力欄が開いている時）：押すと選ぶ／外す
+  function pickSlot(t, px, slot) {
+    const f = P.f, on = f.tableIds.includes(t.id);
+    const st = toMin(f.start), en = toMin(f.end);
+    const busy = S.day.some((r) => ACTIVE.has(r.status) && r.id !== (P.r && P.r.id) && r.tableIds.includes(t.id) && st < toMin(r.time) + r.stayMin + (r.resetMin || 0) && toMin(r.time) < en + (+f.resetMin || 0));
+    const n = (+f.adults || 0) + (+f.kids || 0);
+    const unfit = n && (n > t.cap || n < (t.min || 1));
+    return h('div', {
+      class: 'slot' + (on ? ' on' : '') + (busy ? ' busy' : '') + (unfit ? ' unfit' : ''),
+      style: 'left:' + px(st) + 'px;width:' + Math.max(slot - 4, ((en - st) / 30) * slot - 3) + 'px',
+      title: t.name + (busy ? '（この時間は別の予約があります）' : '') + (unfit ? '（人数が定員の範囲外）' : ''),
+      text: on ? '✓' : '',
+      onclick: (ev) => { ev.stopPropagation(); f.tableIds = on ? f.tableIds.filter((x) => x !== t.id) : [...f.tableIds, t.id]; renderTime(); renderPanel(); },
     });
-    for (const { t, cells } of g.rowEls) {
-      const mine = t.waiting ? list.filter((r) => !r.tableIds.length) : list.filter((r) => r.tableIds.includes(t.id));
-      for (const r of mine) {
-        const el = blockEl(r, g.px, g.slot, over);
-        attachDrag(el, r, t.id, g);
-        cells.append(el);
-      }
-    }
-    S.grid = g;
-    if (S.date === S.today && !S.scrolledToday) {
-      const now = new Date();
-      $('#grid-wrap').scrollLeft = Math.max(0, g.px(now.getHours() * 60 + now.getMinutes()) - 3 * g.slot);
-      S.scrolledToday = true;
-    }
   }
 
-  // 予約の枠を指でつかんで、別の席・時刻へ動かす（動かした後に確認を出す）
+  // 予約の枠を指でつかんで、別のテーブル・時刻へ動かす（動かした後に確認を出す）
   function attachDrag(el, r, fromTid, g) {
     el.addEventListener('pointerdown', (e) => {
       if (e.button) return;
@@ -385,26 +440,22 @@
           document.body.append(ghost); el.classList.add('dragging');
         }
         ghost.style.left = (ev.clientX - offX) + 'px'; ghost.style.top = (ev.clientY - offY) + 'px';
-        target = dropTarget(ev.clientX - offX, ev.clientY, g, r);
+        target = dropTarget(ev.clientX - offX, ev.clientY, g);
         markDrop(target, r, g);
       };
-      const end = (ev, cancelled) => {
-        el.removeEventListener('pointermove', move);
-        el.removeEventListener('pointerup', onUp);
-        el.removeEventListener('pointercancel', onCancel);
+      const end = (cancelled) => {
+        el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', onUp); el.removeEventListener('pointercancel', onCancel);
         if (ghost) ghost.remove();
         el.classList.remove('dragging');
-        if (!moved) { if (!cancelled) openRes(r); return; }
+        if (!moved) { if (!cancelled) openReservation(r); return; }
         if (cancelled || !target) { renderTime(); return; }
         proposeMove(r, fromTid, target);
       };
-      const onUp = (ev) => end(ev, false), onCancel = (ev) => end(ev, true);
-      el.addEventListener('pointermove', move);
-      el.addEventListener('pointerup', onUp);
-      el.addEventListener('pointercancel', onCancel);
+      const onUp = () => end(false), onCancel = () => end(true);
+      el.addEventListener('pointermove', move); el.addEventListener('pointerup', onUp); el.addEventListener('pointercancel', onCancel);
     });
   }
-  function dropTarget(x, y, g, r) {
+  function dropTarget(x, y, g) {
     for (const { t, row, cells } of g.rowEls) {
       const rr = row.getBoundingClientRect();
       if (y < rr.top || y > rr.bottom) continue;
@@ -423,7 +474,7 @@
     target.cells.append(h('div', { class: 'drop-mark', style: 'left:' + g.px(toMin(target.time)) + 'px;width:' + Math.max(g.slot - 4, (r.stayMin / 30) * g.slot - 3) + 'px' }));
   }
   function resInput(r, change) {
-    return { date: r.date, time: r.time, stayMin: r.stayMin, guests: r.guests, kids: r.kids || 0, tableIds: r.tableIds, customerId: r.customerId || null, courseId: r.courseId, source: r.source, memo: r.memo, status: r.status, ...change };
+    return { date: r.date, time: r.time, stayMin: r.stayMin, resetMin: r.resetMin, timeLimit: r.timeLimit, adults: r.adults, adultsMin: r.adultsMin, kids: r.kids, kidsMin: r.kidsMin, tableIds: r.tableIds, customerId: r.customerId || null, courses: r.courses, source: r.source, memo: r.memo, status: r.status, staff: r.staff, tags: r.tags, free: r.free, ...change };
   }
   function proposeMove(r, fromTid, target) {
     let tables;
@@ -432,8 +483,7 @@
     else tables = [...new Set(r.tableIds.map((t) => (t === fromTid ? target.tid : t)))];
     if (target.time === r.time && tables.join() === r.tableIds.join()) { renderTime(); return; }
     const bar = $('#movebar');
-    $('#mv-text').replaceChildren(
-      h('b', { text: target.time + ' - ' + r.guests + '名様' }), h('br'), document.createTextNode(sama(r.customer)), h('br'),
+    $('#mv-text').replaceChildren(h('b', { text: target.time + ' - ' + guestsText(r) }), h('br'), document.createTextNode(sama(r.customer)), h('br'),
       h('span', { class: 'muted', text: (r.time !== target.time ? r.time + ' → ' + target.time + '　' : '') + (tableNames(r.tableIds) || 'ウェイティング') + ' → ' + (tableNames(tables) || 'ウェイティング') }));
     bar.hidden = false;
     const close = () => { bar.hidden = true; $('#mv-ok').onclick = null; $('#mv-cancel').onclick = null; };
@@ -442,544 +492,726 @@
       close();
       const prev = resInput(r, {});
       try {
-        const ok = await saveWithOverlapCheck(resInput(r, { time: target.time, tableIds: tables }), r.id);
+        const ok = await saveChecked(resInput(r, { time: target.time, tableIds: tables }), r.id);
         if (!ok) { renderTime(); return; }
         await loadDay();
         toast('動かしました', false, { label: '元に戻す', fn: async () => { try { await api('PUT', '/reservations/' + r.id, { ...prev, allowOverlap: true }); await loadDay(); toast('元に戻しました'); } catch (e) { fail(e); } } });
       } catch (e) { fail(e); renderTime(); }
     };
   }
-  async function saveWithOverlapCheck(body, id) {
+  // 保存（営業時間外・テーブルの重なりは確かめてから）
+  async function saveChecked(body, id, opts) {
+    const st = S.boot.settings;
+    const endM = toMin(body.time) + (body.stayMin || (body.endTime ? toMin(body.endTime) - toMin(body.time) : 0));
+    if (opts && opts.hoursCheck && (toMin(body.time) < toMin(st.open) || endM > toMin(st.close))) {
+      if (!(await ask('営業時間外です', 'ご予約が休業時間帯にかかっています。\nこのまま登録してよろしいですか？'))) return null;
+    }
     const url = id ? '/reservations/' + id : '/reservations';
     let r = await api(id ? 'PUT' : 'POST', url, body);
     if (r.conflicts) {
-      const msg = r.conflicts.map((c) => c.time + '〜 ' + (c.name ? c.name + ' 様' : 'お名前なし') + '（' + c.tables.join('・') + '）').join('\n');
-      if (!confirm('同じテーブルに重なる予約があります。\n' + msg + '\nこのまま入れますか？')) return null;
+      const msg = r.conflicts.map((c) => c.time + '〜 ' + (c.name ? c.name + ' 様' : 'お名前なし') + '（' + c.tables.join(', ') + '）').join('\n');
+      if (!(await ask('テーブルが重なっています', '同じテーブルに重なる予約があります。\n' + msg + '\nこのまま登録してよろしいですか？'))) return null;
       r = await api(id ? 'PUT' : 'POST', url, { ...body, allowOverlap: true });
     }
     return r;
   }
 
-  // 画面の向き・大きさが変わったら、マスの幅に合わせて描き直す
   let resizeTimer;
-  window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (L && S.view === 'time' && S.boot) renderTime(); }, 150); });
+  window.addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { if (L && S.view === 'ledger' && S.lmode === 'time' && S.boot) renderTime(); }, 150); });
 
-  // ---------- テーブル配置図 ----------
+  // 予約リスト
+  function renderList() {
+    const showCancel = $('#show-cancel').checked;
+    const list = S.day.filter((r) => showCancel || ACTIVE.has(r.status));
+    const t = $('#day-table'); t.replaceChildren();
+    t.append(h('thead', null, h('tr', null, ['時間', 'ご予約者', '人数', 'テーブル', 'コース', '予約タグ', 'メモ', '状態'].map((x) => h('th', { text: x })))));
+    const tb = h('tbody');
+    for (const r of list) {
+      const c = r.customer;
+      tb.append(h('tr', { class: 'click', onclick: () => openReservation(r) },
+        h('td', null, h('b', { text: r.time }), h('div', { class: 'muted', text: '- ' + toTime(toMin(r.time) + r.stayMin) })),
+        h('td', null, h('b', { class: 'who', text: sama(c) }), c ? h('span', { class: 'vbadge', text: c.visits }) : null, isVip(c) ? h('span', { class: 'badge vip', text: 'VIP' }) : null,
+          c && c.phone ? h('div', { class: 'muted', text: c.phone }) : null, c && c.allergy ? h('div', { class: 'err', text: '⚠ ' + c.allergy }) : null),
+        h('td', { class: 'num', text: guestsText(r) }), h('td', { text: tableNames(r.tableIds) || 'ウェイティング' }),
+        h('td', { text: r.courses.map((x) => courseName(x.courseId) + '×' + x.count).join(', ') }),
+        h('td', null, r.tags.map((g) => h('div', { class: 'badge tag', text: g }))), h('td', { text: r.memo }),
+        h('td', null, h('span', { class: 'pill ' + r.status, text: STATUS[r.status] }), r.flags.map((f) => h('div', null, h('span', { class: 'badge flag f2', text: f }))))));
+    }
+    if (!list.length) tb.append(h('tr', null, h('td', { colspan: 8, class: 'muted', text: 'この日の予約はありません' })));
+    t.append(tb);
+  }
+
+  // テーブル配置図
   $('#floor-time').addEventListener('change', (e) => { S.floorTime = e.target.value; renderFloor(); });
   function renderFloor() {
     const st = S.boot.settings, sel = $('#floor-time');
     const o0 = toMin(st.open), o1 = toMin(st.close);
     if (!S.floorTime || S.floorDate !== S.date) {
       const now = new Date(), nm = now.getHours() * 60 + now.getMinutes();
-      let t = S.date === S.today && nm >= o0 && nm < o1 ? Math.floor(nm / 30) * 30 : (o0 <= 18 * 60 && 18 * 60 < o1 ? 18 * 60 : o0);
-      S.floorTime = toTime(t); S.floorDate = S.date;
+      S.floorTime = toTime(S.date === S.today && nm >= o0 && nm < o1 ? Math.floor(nm / 30) * 30 : (o0 <= 1080 && 1080 < o1 ? 1080 : o0)); S.floorDate = S.date;
     }
     sel.replaceChildren();
     for (let m = Math.floor(o0 / 30) * 30; m < o1; m += 30) sel.append(h('option', { value: toTime(m), text: toTime(m) }));
     sel.value = S.floorTime;
-    const tm = toMin(S.floorTime);
-    const act = S.day.filter((r) => ACTIVE.has(r.status));
+    const tm = toMin(S.floorTime), act = S.day.filter((r) => ACTIVE.has(r.status));
     const box = $('#floor'); box.replaceChildren();
-    const areas = [...new Set(S.boot.tables.map((t) => t.area))];
     let used = 0;
-    for (const area of areas) {
+    for (const area of [...new Set(S.boot.tables.map((t) => t.area))]) {
       const tiles = h('div', { class: 'tiles' });
       for (const t of S.boot.tables.filter((x) => x.area === area)) {
         const mine = act.filter((r) => r.tableIds.includes(t.id)).sort((a, b) => a.time.localeCompare(b.time));
         const now = mine.find((r) => toMin(r.time) <= tm && tm < toMin(r.time) + r.stayMin);
         const next = mine.find((r) => toMin(r.time) > tm);
         if (now) used++;
-        tiles.append(h('div', {
-          class: 'tile ' + (now ? now.status : 'free'),
-          onclick: () => (now ? openRes(now) : openWizard({ date: S.date, time: S.floorTime, tableIds: [t.id], fromGrid: true })),
-        }, h('div', { class: 'tt' }, h('span', { text: t.name }), h('small', { text: capText(t) + '名' })),
-        now ? h('div', { class: 'who', text: sama(now.customer) }) : h('div', { class: 'who', text: '空き' }),
-        now ? h('div', { class: 'sub', text: now.time + '〜' + toTime(toMin(now.time) + now.stayMin) + '・' + now.guests + '名様・' + STATUS[now.status] }) : null,
-        next ? h('div', { class: 'sub', text: '次：' + next.time + ' ' + sama(next.customer) + ' ' + next.guests + '名様' }) : null));
+        tiles.append(h('div', { class: 'tile ' + (now ? now.status : 'free'), onclick: () => (now ? openReservation(now) : openForm(null, { date: S.date, time: S.floorTime, tableIds: [t.id] })) },
+          h('div', { class: 'tt' }, h('span', { text: smokeIcon(t) + ' ' + t.name }), h('small', { text: capText(t) })),
+          h('div', { class: 'who2', text: now ? sama(now.customer) : '空き' }),
+          now ? h('div', { class: 'sub', text: now.time + '-' + toTime(toMin(now.time) + now.stayMin) + '・' + guestsText(now) }) : null,
+          next ? h('div', { class: 'sub', text: '次：' + next.time + ' ' + sama(next.customer) }) : null));
       }
-      box.append(h('div', null, h('div', { class: 'area-h', style: '--area:' + areaColor(area), text: area || 'エリアなし' }), tiles));
+      box.append(h('div', null, h('div', { class: 'area-h', text: area || 'エリアなし' }), tiles));
     }
     $('#floor-note').textContent = S.floorTime + ' の時点：' + used + ' / ' + S.boot.tables.length + ' テーブルが使用中';
   }
 
-  // ---------- 一覧表 ----------
-  $('#list-cancel').addEventListener('change', () => renderList());
-  function renderList() {
-    const showCancel = $('#list-cancel').checked;
-    const list = S.day.filter((r) => showCancel || ACTIVE.has(r.status));
-    const over = overlapIds(S.day);
-    const t = $('#day-table'); t.replaceChildren();
-    t.append(h('thead', null, h('tr', null, ['時間', 'お名前', '人数', 'テーブル', 'コース', '経路', 'メモ', '状態', ''].map((x) => h('th', { text: x, class: x === '人数' ? 'num' : '' })))));
-    const tb = h('tbody');
-    for (const r of list) {
-      const c = r.customer;
-      const btns = h('div', { class: 'st-btns' });
-      const sb = (s, label) => btns.append(h('button', { type: 'button', text: label, onclick: (ev) => { ev.stopPropagation(); setStatus(r, s); } }));
-      if (r.status === 'booked') { sb('seated', '来店'); sb('cancel', 'キャンセル'); }
-      else if (r.status === 'seated') sb('left', '退店');
-      else sb('booked', '予約に戻す');
-      const warns = [];
-      if (c && c.allergy) warns.push('⚠ ' + c.allergy);
-      if (c && (c.noshows || c.cancels)) warns.push('過去にキャンセル' + c.cancels + '・無断' + c.noshows);
-      if (over.has(r.id)) warns.push('テーブルが重なっています');
-      tb.append(h('tr', { class: r.status, onclick: () => openRes(r) },
-        h('td', null, h('div', { class: 'tm', text: r.time }), h('div', { class: 'muted', text: '〜' + toTime(toMin(r.time) + r.stayMin) })),
-        h('td', { class: 'wrap' }, h('b', { text: sama(c) }), c ? h('span', { class: c.visits ? 'badge' : 'badge new', text: c.visits ? '来店' + c.visits + '回' : '初めて' }) : null,
-          isVip(c) ? h('span', { class: 'badge vip', text: 'VIP' }) : null, c ? c.tags.filter((x) => !/^vip$/i.test(x)).map((x) => h('span', { class: 'badge tag', text: x })) : null,
-          c && c.phone ? h('div', { class: 'muted', text: c.phone }) : null, warns.map((w) => h('div', { class: 'warn-t', text: w }))),
-        h('td', { class: 'num', text: r.guests + '名' + (r.kids ? '（子' + r.kids + '）' : '') }),
-        h('td', { text: tableNames(r.tableIds) || 'ウェイティング' }), h('td', { text: courseName(r.courseId) }), h('td', { text: r.source }),
-        h('td', { class: 'wrap', text: r.memo }), h('td', null, h('span', { class: 'pill ' + r.status, text: STATUS[r.status] })), h('td', null, btns)));
-    }
-    if (!list.length) tb.append(h('tr', null, h('td', { colspan: 9, class: 'muted', text: 'この日の予約はありません。右上の ＋ から入れられます。' })));
-    t.append(tb);
+  // ---------- 右側の入力欄（新規予約・変更・詳細） ----------
+  let P = null; // { step: 'form'|'confirm'|'detail', r, f }
+  $('#pn-close').addEventListener('click', () => closePanel());
+  function closePanel(silent) {
+    P = null;
+    $('#panel').hidden = true;
+    if (!silent && S.view === 'ledger') renderDayViews();
   }
-  async function setStatus(r, s) {
-    try { await api('PUT', '/reservations/' + r.id + '/status', { status: s }); toast(STATUS[s] + 'にしました'); await loadDay(); } catch (e) { fail(e); }
+  function timeOptions(sel) {
+    const st = S.boot.settings, out = [];
+    const a = Math.max(0, Math.floor(toMin(st.open) / 60) * 60 - 120), b = Math.min(30 * 60 - 15, Math.ceil(toMin(st.close) / 60) * 60 + 180);
+    for (let m = a; m <= b; m += 15) out.push(toTime(m));
+    if (sel && !out.includes(sel)) out.push(sel), out.sort();
+    return out;
   }
-
-  // ---------- 予約の詳細・変更 ----------
-  const dlg = $('#dlg-res'), form = $('#res-form');
-  let editing = null, linked = null, pickTables = [];
-  function fillSelects() {
-    const src = form.elements.source; src.replaceChildren(h('option', { value: '', text: '（選ぶ）' }), ...S.boot.sources.map((s) => h('option', { value: s, text: s })));
-    const cs = form.elements.courseId; cs.replaceChildren(h('option', { value: '', text: 'なし・席のみ' }), ...S.boot.courses.map((c) => h('option', { value: c.id, text: c.name + (c.price ? '（' + yen(c.price) + '）' : '') })));
-  }
-  function renderStatusSeg() {
-    const box = $('#res-status'); box.replaceChildren();
-    for (const [s, label] of [['booked', '予約'], ['seated', '来店'], ['left', '退店'], ['cancel', 'キャンセル'], ['noshow', '無断']]) {
-      box.append(h('button', {
-        type: 'button', class: s + (editing && editing.status === s ? ' on' : ''), text: label,
-        onclick: async () => {
-          if (!editing || editing.status === s) return;
-          try { const r = await api('PUT', '/reservations/' + editing.id + '/status', { status: s }); editing.status = r.reservation.status; renderStatusSeg(); toast(STATUS[s] + 'にしました'); refreshBehind(); } catch (e) { fail(e); }
-        },
-      }));
-    }
-  }
-  function refreshBehind() { if (LEDGER_VIEWS.has(S.view)) loadDay().catch(fail); else if (S.view === 'customers') loadCustomers().catch(fail); }
-
-  function openRes(r) {
-    editing = r; linked = r.customer || null;
-    const f = form.elements;
-    $('#res-title').textContent = r.date + ' ' + r.time + '〜 の予約';
-    f.date.value = r.date; f.time.value = r.time; f.guests.value = r.guests; f.kids.value = r.kids || 0; f.stayMin.value = r.stayMin;
-    f.source.value = r.source; f.courseId.value = r.courseId; f.memo.value = r.memo;
-    f.phone.value = linked ? linked.phone : ''; f.name.value = linked ? linked.name : ''; f.kana.value = linked ? linked.kana : ''; f.allergy.value = linked ? linked.allergy : '';
-    pickTables = [...r.tableIds];
-    $('#res-err').textContent = '';
-    renderStatusSeg();
-    renderMatch([]);
-    renderTablePick();
-    dlg.showModal();
-  }
-  function renderMatch(hits) {
-    const box = $('#res-match'); box.replaceChildren();
-    if (linked) {
-      box.append(h('div', { class: 'hit linked' },
-        h('b', { text: 'No.' + linked.no + ' ' + sama(linked) }),
-        h('span', { text: '来店' + linked.visits + '回' + (linked.last ? '（前回 ' + linked.last + '）' : '') }),
-        linked.cancels || linked.noshows ? h('span', { class: 'warn-t', text: 'キャンセル' + linked.cancels + '・無断' + linked.noshows }) : null,
-        linked.memo ? h('span', { class: 'muted', text: linked.memo }) : null,
-        h('button', { type: 'button', text: '別の方にする', onclick: () => { linked = null; renderMatch([]); } })));
-      return;
-    }
-    for (const c of hits.slice(0, 5)) {
-      box.append(h('div', { class: 'hit' },
-        h('b', { text: 'No.' + c.no + ' ' + sama(c) }), h('span', { text: c.phone }),
-        h('span', { text: '来店' + c.visits + '回' + (c.last ? '・前回 ' + c.last : '') }),
-        c.allergy ? h('span', { class: 'warn-t', text: '⚠' + c.allergy }) : null,
-        h('button', { type: 'button', text: 'この方にする', onclick: () => { linked = c; const f = form.elements; f.phone.value = c.phone; f.name.value = c.name; f.kana.value = c.kana; f.allergy.value = c.allergy; renderMatch([]); } })));
-    }
-  }
-  let searchTimer;
-  function searchCust() {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(async () => {
-      if (linked) return;
-      const f = form.elements; const q = f.phone.value.replace(/\D/g, '').length >= 4 ? f.phone.value : f.name.value;
-      if (!q || q.trim().length < 2) return renderMatch([]);
-      try { renderMatch((await api('GET', '/customers?limit=5&q=' + encodeURIComponent(q))).customers); } catch (e) { /* 入力中は黙る */ }
-    }, 250);
-  }
-  // iPadのキーボード・日本語の変換確定でも確実に探すよう、いくつかの合図で探す
-  for (const n of ['phone', 'name']) for (const ev of ['input', 'keyup', 'change', 'compositionend']) form.elements[n].addEventListener(ev, searchCust);
-  ['date', 'time', 'stayMin'].forEach((n) => form.elements[n].addEventListener('change', renderTablePick));
-
-  async function renderTablePick() {
-    const f = form.elements, box = $('#res-tables'); box.replaceChildren();
-    let busy = new Set();
-    try { busy = new Set((await api('GET', '/availability?' + qs({ date: f.date.value, time: f.time.value || '00:00', stayMin: +f.stayMin.value || 60, guests: 1, exclude: editing && editing.id }))).busy); } catch (err) { busy = new Set(); }
-    for (const t of S.boot.tables) {
-      const on = pickTables.includes(t.id);
-      box.append(h('button', {
-        type: 'button', class: (on ? 'on' : '') + (busy.has(t.id) ? ' busy' : ''), title: busy.has(t.id) ? 'この時間は埋まっています' : '',
-        text: t.name + '（' + capText(t) + '）', onclick: () => { pickTables = on ? pickTables.filter((x) => x !== t.id) : [...pickTables, t.id]; renderTablePick(); },
-      }));
-    }
-  }
-  $('#res-cancel').addEventListener('click', () => dlg.close());
-  $('#res-del').addEventListener('click', async () => {
-    if (!editing) return;
-    if (!confirm(editing.date + ' ' + editing.time + ' の予約を削除します。元に戻せません。\nキャンセルの記録を残したい時は「キャンセル」を押してください。\n削除しますか？')) return;
-    try { await api('DELETE', '/reservations/' + editing.id); dlg.close(); toast('削除しました'); refreshBehind(); } catch (e) { fail(e); }
-  });
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const f = form.elements;
-    const body = {
-      date: f.date.value, time: f.time.value, guests: +f.guests.value, kids: +f.kids.value || 0, stayMin: +f.stayMin.value,
-      source: f.source.value, courseId: f.courseId.value, status: editing.status, memo: f.memo.value, tableIds: pickTables,
-      customerId: linked ? linked.id : null,
-      customer: { name: f.name.value, kana: f.kana.value, phone: f.phone.value, allergy: f.allergy.value },
-    };
-    $('#res-err').textContent = '';
-    try {
-      const r = await saveWithOverlapCheck(body, editing.id);
-      if (!r) return;
-      dlg.close();
-      toast('保存しました');
-      if (LEDGER_VIEWS.has(S.view) && body.date !== S.date) { S.date = body.date; S.calYm = body.date.slice(0, 7); }
-      refreshBehind();
-    } catch (err) { $('#res-err').textContent = err.message; }
-  });
-
-  // ---------- 新規予約（日時／人数 → テーブル選択 → 詳細 → 確認） ----------
-  const wiz = $('#dlg-wiz');
-  let W = null;
-  function openWizard(p) {
+  function blankForm(p) {
     const st = S.boot.settings;
-    W = {
-      step: 0, maxStep: 0, date: p.date || S.date, time: p.time || '', adults: '', kids: '', stayMin: st.defaultStayMin,
-      tableIds: p.tableIds || [], presetTables: !!(p.tableIds && p.tableIds.length), autoNote: '', avail: null,
-      phone: '', name: '', kana: '', allergy: '', courseId: '', source: '電話', memo: '', customer: null, hits: [], key: 'adults',
+    const start = p.time || (S.date === S.today ? toTime(Math.max(toMin(st.open), Math.ceil((new Date().getHours() * 60 + new Date().getMinutes()) / 15) * 15)) : '18:00');
+    return {
+      date: p.date || S.date, start, end: toTime(Math.min(toMin(start) + st.defaultStayMin, 30 * 60 - 15)), timeLimit: false, resetMin: 0,
+      adultsMin: '', adults: '', kidsMin: 0, kids: 0, tableIds: p.tableIds || [],
+      phone: '', phone2: '', lastKana: '', firstKana: '', lastName: '', firstName: '', company: '',
+      courses: [{ courseId: '', count: '' }], memo: '', tags: [], free: '', source: '電話', staff: '', customer: null, hits: [],
     };
-    renderWiz();
-    wiz.showModal();
   }
-  $('#wiz-close').addEventListener('click', () => { if (wizDirty() && !confirm('入力中の予約を閉じますか？（保存されません）')) return; wiz.close(); });
-  wiz.addEventListener('cancel', (e) => { if (wizDirty() && !confirm('入力中の予約を閉じますか？（保存されません）')) e.preventDefault(); });
-  function wizDirty() { return W && (W.adults || W.phone || W.name); }
-  $$('#wiz-steps [data-step]').forEach((b) => b.addEventListener('click', () => { const n = +b.dataset.step; if (n <= W.maxStep) { W.step = n; renderWiz(); } }));
-  $('#wiz-back').addEventListener('click', () => { if (W.step > 0) { W.step--; renderWiz(); } });
-  $('#wiz-next').addEventListener('click', () => wizNext().catch(fail));
-
-  const guestsOf = () => (+W.adults || 0) + (+W.kids || 0);
-  function wizError() {
-    if (W.step === 0) {
-      if (!C.isDate(W.date)) return '日付を入れてください。';
-      if (!/^\d{2}:\d{2}$/.test(W.time)) return '時間を入れてください。';
-      if (guestsOf() < 1) return '人数を入力してください。';
-    }
-    return '';
-  }
-  async function wizNext() {
-    const err = wizError();
-    const msg = $('#wiz-msg');
-    if (err) { msg.textContent = err; msg.classList.add('show'); return; }
-    msg.classList.remove('show');
-    if (W.step < 3) { W.step++; W.maxStep = Math.max(W.maxStep, W.step); renderWiz(); return; }
-    const body = {
-      date: W.date, time: W.time, guests: guestsOf(), kids: +W.kids || 0, stayMin: W.stayMin, tableIds: W.tableIds,
-      courseId: W.courseId, source: W.source, memo: W.memo, status: 'booked',
-      customerId: W.customer ? W.customer.id : null,
-      customer: { name: W.name, kana: W.kana, phone: W.phone, allergy: W.allergy },
+  function formFrom(r) {
+    const c = r.customer || {};
+    return {
+      date: r.date, start: r.time, end: toTime(toMin(r.time) + r.stayMin), timeLimit: r.timeLimit, resetMin: r.resetMin || 0,
+      adultsMin: r.adultsMin, adults: r.adults, kidsMin: r.kidsMin, kids: r.kids, tableIds: [...r.tableIds],
+      phone: c.phone || '', phone2: c.phone2 || '', lastKana: c.lastKana || '', firstKana: c.firstKana || '', lastName: c.lastName || '', firstName: c.firstName || '', company: c.company || '',
+      courses: r.courses.length ? r.courses.map((x) => ({ ...x })) : [{ courseId: '', count: '' }], memo: r.memo, tags: [...r.tags], free: r.free || '', source: r.source || '', staff: r.staff || '',
+      customer: r.customer || null, hits: [],
     };
-    const r = await saveWithOverlapCheck(body, null);
-    if (!r) return;
-    wiz.close();
-    S.date = W.date; S.calYm = W.date.slice(0, 7);
-    toast(W.date.slice(5).replace('-', '/') + ' ' + W.time + ' ' + guestsOf() + '名様の予約を入れました');
-    show(LEDGER_VIEWS.has(S.view) ? S.view : S.ledgerView);
+  }
+  function openForm(r, preset) {
+    if (S.view !== 'ledger') show('ledger');
+    P = { step: 'form', r: r || null, f: r ? formFrom(r) : blankForm(preset || {}) };
+    if (P.f.date !== S.date) { S.date = P.f.date; loadDay().catch(fail); }
+    $('#panel').hidden = false;
+    renderPanel();
+    S.lmode = 'time'; S.floor = false;
+    renderDayViews();
+  }
+  function openReservation(r) {
+    if (S.view !== 'ledger') { S.date = r.date; show('ledger'); }
+    else if (r.date !== S.date) { S.date = r.date; loadDay().catch(fail); }
+    P = { step: 'detail', r, f: null };
+    $('#panel').hidden = false;
+    renderPanel();
+    if (S.lmode === 'time') renderTime();
   }
 
-  function renderWiz() {
-    const body = $('#wiz-body'); body.replaceChildren(); body.className = 'wiz-body';
-    $('#wiz-msg').classList.remove('show');
-    $$('#wiz-steps [data-step]').forEach((b) => { const n = +b.dataset.step; b.classList.toggle('on', n === W.step); b.classList.toggle('done', n < W.step || (n <= W.maxStep && n !== W.step)); });
-    $('#wiz-back').style.visibility = W.step ? 'visible' : 'hidden';
-    $('#wiz-next').textContent = W.step === 3 ? '✓' : '›';
-    $('#wiz-next').setAttribute('aria-label', W.step === 3 ? '予約を確定' : '次へ');
-    const p = [stepDatePeople, stepTable, stepDetail, stepConfirm][W.step](body);
-    if (p && p.catch) p.catch(fail);
-  }
-  const q = (title, ...kids) => h('div', { class: 'q' }, h('div', { class: 'qt', text: title }), ...kids);
-  function quick(items, cur, onPick) { return h('div', { class: 'quick' }, items.map(([v, label]) => h('button', { type: 'button', class: v === cur ? 'on' : '', text: label, onclick: () => onPick(v) }))); }
-  // iPadでは画面の大きなテンキーで入れる。iPhoneの幅では画面に収まらないので、iPhoneの数字キーボードを使う
-  const narrow = () => matchMedia('(max-width: 700px)').matches;
-  function numInput(field, label) {
-    const native = field === 'phone' ? 'tel' : 'numeric';
-    const el = h('input', { type: 'text', inputmode: coarse && !narrow() ? 'none' : native, value: W[field], 'aria-label': label, class: W.key === field ? 'on-key' : '' });
-    el.addEventListener('focus', () => { W.key = field; $$('.on-key', $('#wiz-body')).forEach((x) => x.classList.remove('on-key')); el.classList.add('on-key'); const k = $('.keypad .k-lbl'); if (k) k.textContent = label + 'を入力'; });
-    el.addEventListener('input', () => { W[field] = el.value.replace(/\D/g, '').slice(0, field === 'phone' ? 15 : 3); el.value = W[field]; if (field === 'phone') phoneSearch(); });
-    el.dataset.field = field;
-    return el;
-  }
-  // 大きな数字のボタン（電話を受けながら指で押しやすいように）
-  function keypad(labelOf) {
-    if (narrow()) return null;
-    const pad = h('div', { class: 'keypad' }, h('div', { class: 'k-lbl', text: labelOf() + 'を入力' }));
-    const press = (k) => {
-      const f = W.key; let v = String(W[f] || '');
-      v = k === 'del' ? v.slice(0, -1) : (v + k).slice(0, f === 'phone' ? 15 : 3);
-      if (f !== 'phone') v = v.replace(/^0+(?=\d)/, '');
-      W[f] = v;
-      const inp = $('#wiz-body [data-field="' + f + '"]'); if (inp) inp.value = v;
-      if (f === 'phone') phoneSearch();
-    };
-    for (const k of ['1', '2', '3', '4', '5', '6', '7', '8', '9']) pad.append(h('button', { type: 'button', text: k, onclick: () => press(k) }));
-    pad.append(h('span'), h('button', { type: 'button', text: '0', onclick: () => press('0') }), h('button', { type: 'button', class: 'k-del', text: '⌫', 'aria-label': '1文字消す', onclick: () => press('del') }));
-    return pad;
+  function renderPanel() {
+    if (!P) return;
+    const body = $('#pn-body'), foot = $('#pn-foot');
+    body.replaceChildren(); foot.replaceChildren();
+    $('#pn-title').textContent = jpDate(P.f ? P.f.date : P.r.date);
+    if (P.step === 'detail') return panelDetail(body, foot);
+    if (P.step === 'confirm') return panelConfirm(body, foot);
+    return panelForm(body, foot);
   }
 
-  function stepDatePeople(body) {
-    const st = S.boot.settings;
-    if (W.key !== 'adults' && W.key !== 'kids') W.key = 'adults';
-    const dateIn = h('input', { type: 'date', value: W.date, onchange: (e) => { W.date = e.target.value; W.avail = null; renderWiz(); } });
-    const timeIn = h('input', { type: 'time', step: 900, value: W.time, onchange: (e) => { W.time = e.target.value; W.avail = null; renderWiz(); } });
-    const times = [];
-    for (let m = Math.ceil(toMin(st.open) / 30) * 30; m < toMin(st.close); m += 30) times.push([toTime(m), toTime(m)]);
-    const left = h('div', null,
-      q('お日にちはいつですか？', dateIn, quick([[S.today, '今日'], [addDays(S.today, 1), '明日'], [addDays(S.today, 2), '明後日']], W.date, (v) => { W.date = v; W.avail = null; renderWiz(); }), h('div', { class: 'hint', text: C.isDate(W.date) ? jpDate(W.date) : '' })),
-      q('お時間は何時からですか？', timeIn, quick(times, W.time, (v) => { W.time = v; W.avail = null; renderWiz(); })),
-      q('人数は何名様ですか？', h('div', { class: 'ppl' },
-        h('span', { text: '大人' }), numInput('adults', '大人の人数'), h('span', { text: '名様' }),
-        h('span', { text: 'お子様' }), numInput('kids', 'お子様の人数'), h('span', { text: '名様（お席が必要なお子様）' }))));
-    body.append(left, keypad(() => (W.key === 'kids' ? 'お子様の人数' : '大人の人数')));
-  }
-
-  async function stepTable(body) {
-    body.className = 'wiz-body one';
-    const n = guestsOf();
-    const a = await api('GET', '/availability?' + qs({ date: W.date, time: W.time, stayMin: W.stayMin, guests: n }));
-    const busy = new Set(a.busy);
-    // 席を自動で割り当てる（空いている時刻の席から、人数に合う一番小さい席）。手で選んだ席はそのまま
-    const key = W.date + W.time + n + W.stayMin;
-    if (W.autoKey !== key) {
-      W.autoKey = key;
-      if (W.presetTables && W.tableIds.length && !W.tableIds.some((t) => busy.has(t))) W.autoNote = 'タップしたテーブルに入れます。';
-      else if (a.suggest) { W.tableIds = [a.suggest]; W.autoNote = '空いているテーブルから自動で選びました。'; }
-      else { W.tableIds = []; W.autoNote = '人数に合う空きテーブルがありません。ウェイティングリストに入れるか、テーブルを選んでください（複数選べます）。'; }
-    }
-    const capSum = W.tableIds.reduce((s, id) => s + ((S.boot.tables.find((t) => t.id === id) || {}).cap || 0), 0);
-    const day = (await api('GET', '/reservations?from=' + W.date + '&to=' + W.date)).reservations.filter((r) => ACTIVE.has(r.status));
-    body.append(
-      h('p', { class: 'wiz-note' }, h('b', { text: jpDate(W.date) + ' ' + W.time + '〜 ' + n + '名様' }), '　' + W.autoNote),
-      q('滞在時間', quick([60, 90, 120, 150, 180].map((m) => [m, m + '分']), W.stayMin, (v) => { W.stayMin = v; renderWiz(); })),
-      h('p', { class: 'wiz-note' }, '選んだテーブル：', h('b', { text: tableNames(W.tableIds) || 'ウェイティングリスト' }),
-        W.tableIds.length ? '（定員 ' + capSum + '名' + (capSum < n ? '・人数より少ないです' : '') + '）' : ''),
-      h('div', { class: 'quick' }, h('button', { type: 'button', text: 'ウェイティングリストに入れる（席を決めない）', onclick: () => { W.tableIds = []; W.autoNote = 'ウェイティングリストに入れます。'; renderWiz(); } })));
-    const mini = h('div', { class: 'grid mini-grid' });
-    const wrap = h('div', { class: 'mini' }, mini);
-    body.append(wrap);
-    const g = buildGrid(mini, day, {
-      date: W.date,
-      onRow: (t, row) => {
-        if (t.waiting) { if (!W.tableIds.length) row.classList.add('pick'); return; }
-        if (W.tableIds.includes(t.id)) row.classList.add('pick');
-        if (busy.has(t.id)) row.classList.add('busyrow');
-        if (n > t.cap || n < (t.min || 1)) row.classList.add('unfit');
-        row.addEventListener('click', () => {
-          W.tableIds = W.tableIds.includes(t.id) ? W.tableIds.filter((x) => x !== t.id) : [...W.tableIds, t.id];
-          W.autoNote = busy.has(t.id) ? 'このテーブルは、その時間に別の予約があります。' : '';
-          renderWiz();
-        });
-      },
+  function fld(label, ...kids) { return h('div', { class: 'fld' }, label ? h('span', { class: 'fl', text: label }) : null, ...kids); }
+  function panelForm(body, foot) {
+    const f = P.f;
+    const bind = (k, el, num) => { el.value = f[k] == null ? '' : f[k]; el.addEventListener('input', () => { f[k] = num ? (el.value === '' ? '' : +el.value) : el.value; }); return el; };
+    const sel = (k, opts, onch) => { const el = h('select', null, opts.map(([v, t]) => h('option', { value: v, text: t }))); el.value = f[k]; el.addEventListener('change', () => { f[k] = el.value; if (onch) onch(); }); return el; };
+    const reTime = () => { renderTime(); renderPanel(); };
+    const startSel = sel('start', timeOptions(f.start).map((t) => [t, t]), () => { if (toMin(f.end) <= toMin(f.start)) f.end = toTime(toMin(f.start) + S.boot.settings.defaultStayMin); reTime(); });
+    const endSel = sel('end', timeOptions(f.end).map((t) => [t, t]), reTime);
+    const tl = h('input', { type: 'checkbox', checked: f.timeLimit, onchange: (e) => { f.timeLimit = e.target.checked; } });
+    const reset = sel('resetMin', [0, 15, 30, 45, 60].map((m) => [m, m + '分']), reTime);
+    reset.value = String(f.resetMin);
+    const num = (k, ph) => { const el = bind(k, h('input', { type: 'number', min: 0, max: 300, inputmode: 'numeric', placeholder: ph || '' }), true); el.addEventListener('change', () => { if (k === 'adults' && (f.adultsMin === '' || f.adultsMin > f.adults)) f.adultsMin = f.adults; if (k === 'kids' && (f.kidsMin === '' || f.kidsMin > f.kids)) f.kidsMin = f.kids; renderTime(); renderPanel(); }); return el; };
+    const n = (+f.adults || 0) + (+f.kids || 0);
+    body.append(h('div', { class: 'pn-sec', text: P.r ? '予約の変更' : '基本情報' }),
+      fld('時間', h('div', { class: 'pair' }, startSel, h('span', { text: '-' }), endSel), h('label', { class: 'chk' }, tl, '時間制限あり')),
+      fld('リセットタイム', reset),
+      h('hr', { class: 'thin' }),
+      fld('大人', h('div', { class: 'pair' }, num('adultsMin', '最小'), h('span', { text: '-' }), num('adults', '最大'))),
+      fld('お子様', h('div', { class: 'pair' }, num('kidsMin'), h('span', { text: '-' }), num('kids')), h('span', { class: 'hint', text: '(お席が必要なお子様)' })),
+      h('hr', { class: 'thin' }),
+      fld('テーブル', f.tableIds.length ? h('div', { text: (f.tableIds.map((id) => { const t = S.boot.tables.find((x) => x.id === id); return t ? smokeIcon(t) + ' ' + t.name : ''; }).join(', ')) })
+        : h('div', { class: 'red', text: '席を選択してください（左の表で、テーブルの枠を押します）' }),
+        wide() ? null : tablePicker(),
+        h('button', { class: 'addlink', text: '空いているテーブルを自動で選ぶ', onclick: autoPick }), n ? null : h('div', { class: 'red', text: '人数を入れると、定員に合うテーブルが分かります' })));
+    // 携帯番号・お名前
+    const ph1 = bind('phone', h('input', { type: 'tel', inputmode: 'tel', placeholder: '携帯番号1 (ウォークインは0000)' }));
+    ph1.addEventListener('input', () => { if (String(f.phone).replace(/\D/g, '').length >= 4 && !f.customer) findCust(f.phone); });
+    const ph2 = bind('phone2', h('input', { type: 'tel', inputmode: 'tel', placeholder: '携帯番号2' }));
+    const nameMissing = !String(f.phone).replace(/\D/g, '') && !f.lastName && !f.firstName && !f.lastKana && !f.firstKana && !f.customer;
+    body.append(h('hr', { class: 'thin' }),
+      fld('携帯番号', h('div', { class: 'with-btn' }, ph1, h('button', { class: 'circle-btn', text: '⌕', 'aria-label': '電話番号で探す', onclick: () => findCust(f.phone) })), h('div', { class: 'with-btn' }, ph2, h('span'))),
+      fld('お名前', h('div', { class: 'with-btn' }, h('div', { class: 'two' }, bind('lastKana', h('input', { placeholder: 'せい' })), bind('firstKana', h('input', { placeholder: 'めい' }))),
+        h('button', { class: 'circle-btn', text: '⌕', 'aria-label': 'お名前で探す', onclick: () => findCust((f.lastKana + f.firstKana) || (f.lastName + f.firstName)) })),
+        h('div', { class: 'two' }, bind('lastName', h('input', { placeholder: '姓' })), bind('firstName', h('input', { placeholder: '名' })))),
+      h('div', { class: 'hits', id: 'pn-hits' }),
+      nameMissing ? h('div', { class: 'red', text: '携帯番号かお名前を入力してください' }) : null);
+    renderHits();
+    // 詳細情報
+    const courseRows = h('div');
+    f.courses.forEach((x, i) => {
+      const cs = h('select', null, h('option', { value: '', text: '' }), S.boot.courses.map((k) => h('option', { value: k.id, text: k.name + (k.price ? '（' + yen(k.price) + '）' : '') })));
+      cs.value = x.courseId; cs.addEventListener('change', () => { x.courseId = cs.value; });
+      const cn = h('input', { type: 'number', min: 0, max: 300, value: x.count, placeholder: '', oninput: (e) => { x.count = e.target.value === '' ? '' : +e.target.value; } });
+      courseRows.append(h('div', { class: 'with-btn', style: 'grid-template-columns:1fr 64px auto;margin-bottom:6px' }, cs, cn, h('span', { text: '名' })));
     });
-    for (const { t, cells } of g.rowEls) {
-      const mine = t.waiting ? day.filter((r) => !r.tableIds.length) : day.filter((r) => r.tableIds.includes(t.id));
-      for (const r of mine) { const el = blockEl(r, g.px, g.slot, null); el.style.cursor = 'default'; cells.append(el); }
-      cells.append(h('div', { class: 'sel-win', style: 'left:' + g.px(toMin(W.time)) + 'px;width:' + (W.stayMin / 30) * g.slot + 'px' }));
-    }
-    wrap.scrollLeft = Math.max(0, g.px(toMin(W.time)) - 2 * g.slot);
+    const tagBox = h('div', { class: 'chips' }, S.boot.resTags.map((g) => h('button', { type: 'button', class: f.tags.includes(g) ? 'on' : '', text: g, onclick: () => { f.tags = f.tags.includes(g) ? f.tags.filter((x) => x !== g) : [...f.tags, g]; renderPanel(); } })));
+    body.append(h('hr', { class: 'thin' }), h('div', { class: 'pn-sec', text: '詳細情報' }),
+      fld('会社名', bind('company', h('input'))),
+      fld('コース', courseRows, S.boot.courses.length ? h('button', { class: 'addlink', text: '⊕ コースを追加', onclick: () => { f.courses.push({ courseId: '', count: '' }); renderPanel(); } }) : h('div', { class: 'hint', text: 'コースは「設定」で登録します' })),
+      fld('メモ', bind('memo', h('textarea', { rows: 3 }))),
+      fld('予約タグ', tagBox),
+      S.boot.free.options.length ? fld(S.boot.free.label, sel('free', [['', ''], ...S.boot.free.options.map((o) => [o, o])])) : null,
+      fld('予約経路', sel('source', [['', ''], ...S.boot.sources.map((s) => [s, s])])));
+    // 下のボタン
+    foot.append(h('div', { class: 'err', id: 'pn-err' }), h('div', { class: 'row2' }, h('button', { class: 'primary-line', text: '予約内容を確認', onclick: toConfirm })));
   }
-
-  let phoneTimer;
-  function phoneSearch() {
-    clearTimeout(phoneTimer);
-    phoneTimer = setTimeout(async () => {
-      if (W.customer || W.step !== 2) return;
-      const digits = String(W.phone).replace(/\D/g, '');
-      W.hits = digits.length >= 4 ? (await api('GET', '/customers?limit=5&q=' + digits)).customers : [];
+  // 狭い画面（iPhone・縦のiPad）では入力欄が表を隠すので、入力欄の中でテーブルを選べるようにする
+  function tablePicker() {
+    const f = P.f, st = toMin(f.start), en = toMin(f.end), n = (+f.adults || 0) + (+f.kids || 0);
+    return h('div', { class: 'tchips' }, S.boot.tables.map((t) => {
+      const on = f.tableIds.includes(t.id);
+      const busy = S.day.some((r) => ACTIVE.has(r.status) && r.id !== (P.r && P.r.id) && r.tableIds.includes(t.id) && st < toMin(r.time) + r.stayMin + (r.resetMin || 0) && toMin(r.time) < en + (+f.resetMin || 0));
+      const unfit = n && (n > t.cap || n < (t.min || 1));
+      return h('button', { type: 'button', class: (on ? 'on' : '') + (busy ? ' busy' : '') + (unfit ? ' unfit' : ''), title: busy ? 'この時間は別の予約があります' : '',
+        text: t.name + ' ' + capText(t), onclick: () => { f.tableIds = on ? f.tableIds.filter((x) => x !== t.id) : [...f.tableIds, t.id]; renderPanel(); renderTime(); } });
+    }));
+  }
+  async function autoPick() {
+    const f = P.f, n = (+f.adults || 0) + (+f.kids || 0);
+    if (!n) return toast('先に人数を入れてください', true);
+    try {
+      const a = await api('GET', '/availability?' + qs({ date: f.date, time: f.start, stayMin: toMin(f.end) - toMin(f.start), guests: n, exclude: P.r && P.r.id, resetMin: f.resetMin }));
+      if (!a.suggest) return toast('人数に合う空きテーブルがありません', true);
+      f.tableIds = [a.suggest]; renderTime(); renderPanel();
+    } catch (e) { fail(e); }
+  }
+  let findTimer;
+  function findCust(q) {
+    clearTimeout(findTimer);
+    findTimer = setTimeout(async () => {
+      if (!P || !P.f) return;
+      q = String(q || '').trim();
+      if (q.replace(/\D/g, '') === C.WALKIN) { P.f.hits = []; renderHits(); return; }
+      P.f.hits = q.length >= 2 ? (await api('GET', '/customers?limit=5&q=' + encodeURIComponent(q))).customers : [];
       renderHits();
     }, 200);
   }
   function renderHits() {
-    const box = $('#wiz-hits'); if (!box) return;
-    box.replaceChildren();
-    if (W.customer) {
-      const c = W.customer;
-      box.append(h('div', { class: 'hit linked' }, h('b', { text: 'No.' + c.no + ' ' + sama(c) }), h('span', { text: c.phone }),
-        h('span', { text: '来店' + c.visits + '回' + (c.last ? '・前回 ' + c.last : '') }),
-        c.allergy ? h('span', { class: 'warn-t', text: '⚠' + c.allergy }) : null,
-        c.cancels || c.noshows ? h('span', { class: 'warn-t', text: 'キャンセル' + c.cancels + '・無断' + c.noshows }) : null,
-        c.memo ? h('span', { class: 'muted', text: c.memo }) : null,
-        h('button', { type: 'button', text: '別の方にする', onclick: () => { W.customer = null; W.name = ''; W.kana = ''; W.allergy = ''; renderWiz(); } })));
+    const box = $('#pn-hits'); if (!box || !P || !P.f) return;
+    const f = P.f; box.replaceChildren();
+    if (String(f.phone).replace(/\D/g, '') === C.WALKIN) box.append(h('div', { class: 'hint', text: 'ウォークイン（お名前を入れなければ、お客様は登録しません）' }));
+    if (f.customer) {
+      const c = f.customer;
+      box.append(h('div', { class: 'hit linked' }, h('b', { text: sama(c) }), h('span', { text: '来店' + c.visits + '回' + (c.last ? '・前回 ' + c.last : '') }),
+        c.allergy ? h('span', { class: 'err', text: '⚠' + c.allergy }) : null, c.cancels || c.noshows ? h('span', { class: 'err', text: '取消' + c.cancels + '・No Show' + c.noshows }) : null,
+        h('button', { text: '別の方にする', onclick: () => { f.customer = null; renderPanel(); } })));
       return;
     }
-    for (const c of W.hits) {
-      box.append(h('div', { class: 'hit' }, h('b', { text: 'No.' + c.no + ' ' + sama(c) }), h('span', { text: c.phone }),
-        h('span', { text: '来店' + c.visits + '回' + (c.last ? '・前回 ' + c.last : '') }),
-        c.allergy ? h('span', { class: 'warn-t', text: '⚠' + c.allergy }) : null,
-        h('button', { type: 'button', class: 'primary', text: 'この方で入れる', onclick: () => { W.customer = c; W.phone = c.phone.replace(/\D/g, ''); W.name = c.name; W.kana = c.kana; W.allergy = c.allergy; renderWiz(); } })));
+    for (const c of f.hits) {
+      box.append(h('div', { class: 'hit' }, h('b', { text: sama(c) }), h('span', { text: c.phone }), h('span', { text: '来店' + c.visits + '回' }), c.allergy ? h('span', { class: 'err', text: '⚠' + c.allergy }) : null,
+        h('button', { class: 'blue', text: 'この方', onclick: () => { Object.assign(f, { customer: c, phone: c.phone, phone2: c.phone2, lastName: c.lastName, firstName: c.firstName, lastKana: c.lastKana, firstKana: c.firstKana, company: c.company }); f.hits = []; renderPanel(); } })));
     }
-    if (!W.hits.length && String(W.phone).replace(/\D/g, '').length >= 10) box.append(h('p', { class: 'hint', text: '登録のない電話番号です。初めてのお客様として登録されます。' }));
+  }
+  function formBody() {
+    const f = P.f;
+    return {
+      date: f.date, time: f.start, endTime: f.end, timeLimit: f.timeLimit, resetMin: +f.resetMin || 0,
+      adults: f.adults === '' ? 0 : +f.adults, adultsMin: f.adultsMin === '' ? '' : +f.adultsMin, kids: +f.kids || 0, kidsMin: f.kidsMin === '' ? '' : +f.kidsMin,
+      tableIds: f.tableIds, courses: f.courses.filter((x) => x.courseId), memo: f.memo, tags: f.tags, free: f.free, source: f.source, staff: f.staff,
+      status: P.r ? P.r.status : 'booked',
+      customerId: f.customer ? f.customer.id : null,
+      customer: { phone: f.phone, phone2: f.phone2, lastName: f.lastName, firstName: f.firstName, lastKana: f.lastKana, firstKana: f.firstKana, company: f.company },
+    };
+  }
+  function toConfirm() {
+    const f = P.f, err = $('#pn-err');
+    const n = (+f.adults || 0) + (+f.kids || 0);
+    if (!n) { err.textContent = '人数を入力してください'; return; }
+    if (toMin(f.end) <= toMin(f.start)) { err.textContent = '時間を確かめてください（終わりが始まりより前です）'; return; }
+    if (!String(f.phone).replace(/\D/g, '') && !f.lastName && !f.firstName && !f.lastKana && !f.firstKana && !f.customer) { err.textContent = '携帯番号かお名前を入力してください（ウォークインは0000）'; return; }
+    P.step = 'confirm'; renderPanel(); renderTime();
+  }
+  function panelConfirm(body, foot) {
+    const f = P.f, b = formBody();
+    const who = f.customer ? sama(f.customer) : ([f.lastName, f.firstName].filter(Boolean).join(' ') || [f.lastKana, f.firstKana].filter(Boolean).join(' ') || (String(f.phone).replace(/\D/g, '') === C.WALKIN ? 'ウォークイン' : 'お名前なし')) + (f.lastName || f.firstName || f.lastKana || f.firstKana ? ' 様' : '');
+    const ln = (ic, ...t) => h('div', { class: 'ln' }, h('i', { text: ic }), h('div', null, ...t));
+    body.append(h('div', { class: 'dl' },
+      ln('⏰', f.start + ' - ' + f.end + (f.timeLimit ? '（時間制限あり）' : '') + (+f.resetMin ? '　リセット' + f.resetMin + '分' : '')),
+      ln('👤', guestsText({ guests: b.adults + b.kids, guestsMin: (b.adultsMin === '' ? b.adults : b.adultsMin) + (b.kidsMin === '' ? b.kids : b.kidsMin) }) + (b.kids ? '（お子様' + b.kids + '名）' : '')),
+      ln('▢', tableNames(f.tableIds) || 'ウェイティング（テーブル未定）'),
+      h('hr'), ln('☺', who), f.phone ? ln('☎', f.phone + (f.phone2 ? ' / ' + f.phone2 : '')) : null, f.company ? ln('🏢', f.company) : null,
+      h('hr'), b.courses.length ? ln('🍽', b.courses.map((x) => courseName(x.courseId) + ' ' + (x.count === '' ? b.adults + b.kids : x.count) + '名').join(', ')) : null,
+      f.tags.length ? ln('🏷', f.tags.join(', ')) : null, f.memo ? ln('📝', f.memo) : null, f.free ? ln('◇', S.boot.free.label + '：' + f.free) : null, f.source ? ln('☏', '予約経路：' + f.source) : null));
+    const staffSel = h('select', null, h('option', { value: '', text: '(担当者を選んでください)' }), S.boot.staff.map((s) => h('option', { value: s, text: s })), h('option', { value: 'その他', text: 'その他' }));
+    staffSel.value = f.staff || '';
+    const ok = h('button', { class: 'blue', text: '確定', disabled: S.boot.staff.length && !f.staff, onclick: confirmSave });
+    staffSel.addEventListener('change', () => { f.staff = staffSel.value; ok.disabled = S.boot.staff.length && !f.staff; });
+    foot.append(fld('担当者', staffSel), h('div', { class: 'row2' }, h('button', { class: 'primary-line', text: '戻る', onclick: () => { P.step = 'form'; renderPanel(); renderTime(); } }), ok));
+  }
+  async function confirmSave() {
+    try {
+      const body = formBody();
+      const r = await saveChecked(body, P.r && P.r.id, { hoursCheck: true });
+      if (!r) return;
+      const saved = r.reservation;
+      toast(P.r ? '予約を変更しました' : '予約を登録しました（#' + saved.no + '）');
+      S.date = saved.date;
+      P = { step: 'detail', r: saved, f: null };
+      await loadDay();
+      const fresh = S.day.find((x) => x.id === saved.id);
+      if (fresh) P.r = fresh;
+      renderPanel();
+    } catch (e) { fail(e); }
+  }
+  function panelDetail(body, foot) {
+    const r = P.r, c = r.customer;
+    const ln = (ic, ...t) => h('div', { class: 'ln' }, h('i', { text: ic }), h('div', null, ...t));
+    body.append(h('div', { class: 'dl' },
+      h('div', { class: 'muted', text: '予約番号 #' + r.no }),
+      ln('⏰', r.time + ' - ' + toTime(toMin(r.time) + r.stayMin) + (r.timeLimit ? '（時間制限あり）' : '')),
+      ln('👤', guestsText(r) + (r.kids ? '（お子様' + (r.kidsMin !== r.kids ? r.kidsMin + '-' : '') + r.kids + '名）' : '')),
+      ln('▢', r.tableIds.length ? r.tableIds.map((id) => { const t = S.boot.tables.find((x) => x.id === id); return t ? smokeIcon(t) + ' ' + t.name : ''; }).join(', ') : 'ウェイティング'),
+      h('hr'), ln('☺', h('b', { text: sama(c) }), c ? h('span', { class: 'vbadge', text: c.visits }) : null, isVip(c) ? h('span', { class: 'badge vip', text: 'VIP' }) : null),
+      c && c.phone ? ln('☎', c.phone + (c.phone2 ? ' / ' + c.phone2 : '')) : null, c && c.company ? ln('🏢', c.company) : null,
+      c && c.allergy ? ln('⚠', h('span', { class: 'err', text: c.allergy })) : null,
+      h('hr'), r.tags.length ? ln('🏷', r.tags.join(', ')) : null,
+      r.courses.length ? ln('🍽', r.courses.map((x) => courseName(x.courseId) + ' ' + x.count + '名').join(', ')) : null,
+      r.memo ? ln('📝', r.memo) : null, r.free ? ln('◇', S.boot.free.label + '：' + r.free) : null, r.source ? ln('☏', '予約経路：' + r.source) : null,
+      r.staff ? ln('✎', '担当者：' + r.staff) : null,
+      r.flags.length ? ln('!', r.flags.map((f) => h('span', { class: 'badge flag f2', text: f }))) : null));
+    const stRow = h('div', { class: 'st-row' });
+    for (const [s, label] of [['booked', '予約'], ['seated', '来店'], ['left', '退店'], ['cancel', '予約取消'], ['noshow', 'No Show']]) {
+      stRow.append(h('button', { class: r.status === s ? 'on' : '', text: label, onclick: async () => {
+        if (r.status === s) return;
+        if ((s === 'cancel' || s === 'noshow') && !(await ask(label + 'にします', sama(c) + '\n' + r.time + ' ' + guestsText(r) + '\nこの予約を「' + label + '」にしてよろしいですか？'))) return;
+        try { const x = await api('PUT', '/reservations/' + r.id + '/status', { status: s }); P.r = x.reservation; toast(label + 'にしました'); await loadDay(); P.r = S.day.find((y) => y.id === r.id) || x.reservation; renderPanel(); } catch (e) { fail(e); }
+      } }));
+    }
+    body.append(stRow, h('div', { class: 'hist' }, r.history.slice().reverse().map((x) => h('div', { text: stamp(x.t) + ' ' + EV[x.type] + (x.staff ? '（' + x.staff + '）' : '') }))));
+    foot.append(h('div', { class: 'row2' },
+      h('button', { class: 'danger', text: '削除', onclick: async () => {
+        if (!(await ask('予約を削除します', '#' + r.no + ' ' + r.date + ' ' + r.time + ' の予約を削除します。元に戻せません。\nキャンセルの記録を残したい時は「予約取消」を押してください。', { ok: '削除する' }))) return;
+        try { await api('DELETE', '/reservations/' + r.id); toast('削除しました'); closePanel(); loadDay().catch(fail); } catch (e) { fail(e); }
+      } }),
+      h('button', { class: 'primary-line', text: '変更', onclick: () => openForm(r) })));
   }
 
-  function stepDetail(body) {
-    W.key = 'phone';
-    const txt = (field, ph) => h('input', { type: 'text', value: W[field], placeholder: ph || '', oninput: (e) => { W[field] = e.target.value; } });
-    const course = h('select', { onchange: (e) => { W.courseId = e.target.value; } }, h('option', { value: '', text: 'なし・席のみ' }), S.boot.courses.map((c) => h('option', { value: c.id, text: c.name + (c.price ? '（' + yen(c.price) + '）' : '') })));
-    course.value = W.courseId;
-    const left = h('div', null,
-      q('お電話番号を教えてください。', numInput('phone', '電話番号'), h('div', { id: 'wiz-hits', class: 'match' })),
-      q('お名前を教えてください。', h('div', { class: 'row' }, txt('name', 'お名前'), txt('kana', 'ふりがな'))),
-      q('アレルギーや苦手なものはありますか？', txt('allergy', 'なければ空のまま')),
-      q('コース', course),
-      q('ご予約の経路', quick(S.boot.sources.map((s) => [s, s]), W.source, (v) => { W.source = v; renderWiz(); })),
-      q('メモ', h('textarea', { rows: 2, value: W.memo, oninput: (e) => { W.memo = e.target.value; } })));
-    body.append(left, keypad(() => '電話番号'));
-    renderHits();
-    if (!W.customer && W.phone) phoneSearch();
-  }
-
-  function stepConfirm(body) {
-    body.className = 'wiz-body one';
-    const n = guestsOf(), c = W.customer;
-    const dl = h('dl', { class: 'confirm-list' });
-    const row = (k, v) => dl.append(h('dt', { text: k }), h('dd', { text: v || '—' }));
-    row('日付', jpDate(W.date));
-    row('時間', W.time + '〜' + toTime(toMin(W.time) + W.stayMin) + '（' + W.stayMin + '分）');
-    row('人数', n + '名様' + (+W.kids ? '（大人' + (+W.adults || 0) + '・お子様' + W.kids + '）' : ''));
-    row('テーブル', tableNames(W.tableIds) || 'ウェイティングリスト');
-    row('お名前', W.name ? W.name + ' 様' + (W.kana ? '（' + W.kana + '）' : '') : '');
-    row('電話番号', W.phone);
-    row('お客様', c ? 'No.' + c.no + '・来店' + c.visits + '回' : (W.name || W.phone ? '初めてのお客様（新しく登録）' : 'お名前なし'));
-    row('アレルギー', W.allergy);
-    row('コース', courseName(W.courseId) || 'なし・席のみ');
-    row('経路', W.source);
-    row('メモ', W.memo);
-    body.append(h('p', { class: 'wiz-note', text: 'この内容でよければ、右下の ✓ を押してください。' }), dl);
+  // ---------- 予約を検索 ----------
+  $('#s-go').addEventListener('click', () => doSearch().catch(fail));
+  $('#s-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch().catch(fail); });
+  async function renderSearch() { $('#s-q').focus(); if ($('#s-q').value) await doSearch(); }
+  async function doSearch() {
+    const q = $('#s-q').value.trim();
+    const wrap = $('#s-wrap');
+    if (!q) { wrap.hidden = true; return; }
+    const r = await api('GET', '/search?q=' + encodeURIComponent(q));
+    const t = $('#s-table'); t.replaceChildren();
+    t.append(h('thead', null, h('tr', null, ['来店日時', 'ご予約者', '人数', 'テーブル', '予約タグ'].map((x) => h('th', { text: x })))));
+    const tb = h('tbody');
+    for (const x of r.reservations) tb.append(h('tr', { class: 'click', onclick: () => openReservation(x) },
+      h('td', { text: jpDate(x.date).replace(/^\d+年/, (y) => y) + ' ' + x.time }), h('td', null, h('b', { class: 'who', text: sama(x.customer) }), x.status !== 'booked' ? h('span', { class: 'pill ' + x.status, text: STATUS[x.status] }) : null),
+      h('td', { text: guestsText(x) }), h('td', { text: tableNames(x.tableIds) || 'ウェイティング' }), h('td', null, x.tags.map((g) => h('div', { class: 'badge tag', text: '🏷 ' + g })))));
+    if (!r.reservations.length) tb.append(h('tr', null, h('td', { colspan: 5, class: 'muted', text: '見つかりませんでした' })));
+    t.append(tb); wrap.hidden = false;
   }
 
   // ---------- 顧客台帳 ----------
-  let cTimer;
-  $('#c-q').addEventListener('input', () => { clearTimeout(cTimer); cTimer = setTimeout(() => loadCustomers().catch(fail), 250); });
-  $('#c-stale').addEventListener('change', () => loadCustomers().catch(fail));
-  $('#c-reset').addEventListener('click', () => { $('#c-q').value = ''; $('#c-stale').checked = false; S.custTag = ''; S.custVisits = 0; loadCustomers().catch(fail); });
-  $('#c-new').addEventListener('click', () => openCust(null));
-  $$('#c-sort button').forEach((b) => b.addEventListener('click', () => { S.custSort = b.dataset.sort; loadCustomers().catch(fail); }));
-
-  async function loadCustomers() {
-    const r = await api('GET', '/customers?' + qs({ limit: 1000, q: $('#c-q').value, sort: S.custSort, tag: S.custTag, minVisits: S.custVisits || '', stale: $('#c-stale').checked ? 1 : '' }));
-    const filtered = $('#c-q').value || S.custTag || S.custVisits || $('#c-stale').checked;
-    $('#c-title').textContent = '顧客台帳：' + (filtered ? '絞り込み' : '全てのお客様') + '（' + r.total + '人' + (filtered ? '／全' + r.all + '人' : '') + '）';
-    $$('#c-sort button').forEach((b) => b.classList.toggle('on', b.dataset.sort === S.custSort));
-    const tags = $('#c-tags'); tags.replaceChildren();
-    for (const t of r.tags) tags.append(h('button', { type: 'button', class: S.custTag === t ? 'on' : '', text: t, onclick: () => { S.custTag = S.custTag === t ? '' : t; loadCustomers().catch(fail); } }));
-    if (!r.tags.length) tags.append(h('span', { class: 'hint', text: 'タグはまだありません' }));
-    const vs = $('#c-visits'); vs.replaceChildren();
-    for (const n of [1, 2, 5, 10]) vs.append(h('button', { type: 'button', class: S.custVisits === n ? 'on' : '', text: n + '回以上', onclick: () => { S.custVisits = S.custVisits === n ? 0 : n; loadCustomers().catch(fail); } }));
-    const ul = $('#c-list'); ul.replaceChildren();
-    for (const c of r.customers) {
-      const sub = [c.company, c.tags.filter((x) => !/^vip$/i.test(x)).join('・'), c.allergy ? '⚠' + c.allergy : '', c.memo].filter(Boolean).join('　');
-      ul.append(h('li', { class: S.custSel === c.id ? 'sel' : '', onclick: () => { S.custSel = c.id; $$('#c-list li').forEach((x) => x.classList.remove('sel')); ul.children[r.customers.indexOf(c)].classList.add('sel'); custDetail(c.id).catch(fail); } },
-        h('div', { class: 'cn' }, h('b', { text: c.name || c.phone || 'お名前なし' }), h('small', { text: sub || (c.kana || '') })),
-        isVip(c) ? h('span', { class: 'badge vip', text: 'VIP' }) : null,
-        h('span', { class: 'vcircle', text: c.visits, title: '来店回数' })));
-    }
-    if (!r.customers.length) ul.append(h('li', { class: 'muted', text: r.all ? '見つかりません' : 'お客様はまだいません。予約を入れると自動で登録されます。' }));
-    if (S.custSel) custDetail(S.custSel).catch(() => { S.custSel = null; clearDetail(); }); else clearDetail();
-  }
-  function clearDetail() { const d = $('#c-detail'); d.classList.add('empty'); d.replaceChildren(h('p', { class: 'muted', text: 'お客様を選ぶと、ここに詳しい情報が出ます。' })); }
-
-  async function custDetail(id) {
-    const { customer: c, history } = await api('GET', '/customers/' + id);
-    const box = $('#c-detail'); box.classList.remove('empty'); box.replaceChildren();
-    const kv = (k, v) => [h('dt', { text: k }), h('dd', null, v || '—')];
-    box.append(
-      h('div', { class: 'actions' }, h('span', { class: 'muted', text: 'No.' + c.no }), h('span', { class: 'sep' }), h('button', { text: '✕', 'aria-label': '閉じる', class: 'ghost', onclick: () => { S.custSel = null; $$('#c-list li').forEach((x) => x.classList.remove('sel')); clearDetail(); } })),
-      h('h3', null, c.name ? c.name + ' 様' : (c.phone || 'お名前なし'), isVip(c) ? h('span', { class: 'badge vip', text: 'VIP' }) : null),
-      h('div', { class: 'muted', text: c.kana || '' }),
-      h('dl', { class: 'kvs' },
-        kv('電話番号', c.phone), kv('会社名', c.company), kv('記念日', c.anniv),
-        kv('タグ', c.tags.length ? c.tags.map((x) => h('span', { class: /^vip$/i.test(x) ? 'badge vip' : 'badge tag', text: x })) : ''),
-        kv('アレルギー', c.allergy), kv('来店', c.visits + '回（キャンセル' + c.cancels + '・無断' + c.noshows + '）'),
-        kv('前回・次回', (c.last || '—') + ' ／ ' + (c.next || '—')), kv('メモ', c.memo)),
-      h('div', { class: 'actions' }, h('button', { text: '編集', onclick: () => openCust(c) }), h('button', { class: 'primary', text: 'この方の予約を入れる', onclick: () => { openWizard({ date: S.today }); W.customer = c; W.phone = c.phone.replace(/\D/g, ''); W.name = c.name; W.kana = c.kana; W.allergy = c.allergy; } })),
-      h('h3', { text: '来店の履歴', style: 'font-size:14px;margin-top:18px' }));
-    const t = h('table', { class: 'tbl' }, h('thead', null, h('tr', null, ['日付', '時刻', '人数', 'テーブル', 'コース', '状態'].map((x) => h('th', { text: x })))));
+  $$('#c-tabs button').forEach((b) => b.addEventListener('click', () => { S.cTab = b.dataset.tab; S.cEdit = null; renderCustomers().catch(fail); }));
+  $('#c-go').addEventListener('click', () => renderCustomers().catch(fail));
+  $('#c-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') renderCustomers().catch(fail); });
+  let cqTimer;
+  $('#c-q').addEventListener('input', () => { clearTimeout(cqTimer); cqTimer = setTimeout(() => renderCustomers().catch(fail), 300); });
+  $$('#c-sort button').forEach((b) => b.addEventListener('click', () => {
+    const k = b.dataset.sort;
+    S.cSort = k === 'kana' ? (S.cSort === 'kana' ? 'kanaDesc' : 'kana') : (S.cSort === 'visits' ? 'visitsAsc' : 'visits');
+    renderCustomers().catch(fail);
+  }));
+  async function renderCustomers() {
+    $$('#c-tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.cTab && !S.cEdit));
+    const formMode = S.cTab === 'new' || S.cEdit;
+    $('#c-listbox').hidden = !!formMode; $('#c-form').hidden = !formMode;
+    $('#c-vt').textContent = S.cEdit ? '顧客の詳細' : S.cTab === 'new' ? '新規顧客' : '顧客台帳';
+    if (formMode) return renderCustForm(S.cEdit);
+    $$('#c-sort button').forEach((b) => b.classList.toggle('on', S.cSort.startsWith(b.dataset.sort)));
+    const r = await api('GET', '/customers?' + qs({ limit: 1000, q: $('#c-q').value, sort: S.cSort, hidden: S.cTab === 'hidden' ? 1 : '' }));
+    const t = $('#c-table'); t.replaceChildren();
+    t.append(h('thead', null, h('tr', null, h('th', { text: 'お名前' }), h('th', { class: 'num', text: '来店回数' }), h('th', { text: '' }))));
     const tb = h('tbody');
-    for (const r of history) tb.append(h('tr', { onclick: () => openRes({ ...r, customer: c }) }, h('td', { text: r.date }), h('td', { text: r.time }), h('td', { text: r.guests + '名' }), h('td', { text: tableNames(r.tableIds) || 'ウェイティング' }), h('td', { text: courseName(r.courseId) }), h('td', null, h('span', { class: 'pill ' + r.status, text: STATUS[r.status] }))));
-    if (!history.length) tb.append(h('tr', null, h('td', { colspan: 6, class: 'muted', text: '予約の記録はまだありません' })));
-    t.append(tb); box.append(t);
+    for (const c of r.customers) tb.append(h('tr', { class: 'click', onclick: () => { S.cEdit = c.id; renderCustomers().catch(fail); } },
+      h('td', null, h('b', { text: c.name || c.kana || c.phone || 'お名前なし' }), c.kana && c.name ? h('span', { class: 'muted', text: '　' + c.kana }) : null, isVip(c) ? h('span', { class: 'badge vip', text: 'VIP' }) : null,
+        c.tags.filter((x) => !/^vip$/i.test(x)).length ? h('div', { class: 'muted', text: c.tags.filter((x) => !/^vip$/i.test(x)).join('・') }) : null),
+      h('td', { class: 'num', text: c.visits }), h('td', { class: 'num' }, h('span', { class: 'link', text: '詳細 ›' }))));
+    if (!r.customers.length) tb.append(h('tr', null, h('td', { colspan: 3, class: 'muted', text: S.cTab === 'hidden' ? '非表示のお客様はいません' : r.all ? '見つかりません' : 'お客様はまだいません。予約を入れると自動で登録されます。' })));
+    t.append(tb);
+  }
+  async function renderCustForm(id) {
+    const box = $('#c-form'); box.replaceChildren();
+    let c = null, history = [];
+    if (id) { const r = await api('GET', '/customers/' + id); c = r.customer; history = r.history; }
+    const v = (k) => (c ? c[k] || '' : '');
+    const inp = (k, ph, type) => h('input', { name: k, value: v(k), placeholder: ph || '', type: type || 'text' });
+    let attrs = c ? [...c.tags] : [];
+    const chipBox = h('div', { class: 'chips' });
+    const drawChips = () => { chipBox.replaceChildren(...[...new Set([...S.boot.custAttrs, ...attrs])].map((g) => h('button', { type: 'button', class: attrs.includes(g) ? 'on' : '', text: g, onclick: () => { attrs = attrs.includes(g) ? attrs.filter((x) => x !== g) : [...attrs, g]; drawChips(); } }))); };
+    drawChips();
+    const row = (label, ...kids) => h('div', { class: 'cf' }, h('span', { class: 'fl', text: label }), h('div', { class: 'stack' }, ...kids));
+    const form = h('form', { class: 'cform', autocomplete: 'off' },
+      row('お名前', h('div', { class: 'two' }, inp('lastKana', 'せい'), inp('firstKana', 'めい')), h('div', { class: 'two' }, inp('lastName', '姓'), inp('firstName', '名'))),
+      row('携帯番号', inp('phone', '', 'tel'), inp('phone2', '', 'tel')),
+      row('会社名', inp('company')),
+      row('メモ', h('textarea', { name: 'memo', rows: 5, value: v('memo') })),
+      row('お客様属性', chipBox),
+      row('アレルギー', inp('allergy')),
+      row('記念日', inp('anniv', '例：誕生日 5/3')),
+      row('領収書名', inp('receiptName')), row('部署名', inp('dept')), row('役職名', inp('title')),
+      row('メールアドレス', inp('email', 'メールアドレス1', 'email'), inp('email2', 'メールアドレス2', 'email')),
+      row('Twitter', inp('twitter')), row('Facebook', inp('facebook')),
+      row('勤務先住所', inp('workZip', '郵便番号'), inp('workAddr', '住所')),
+      row('自宅住所', inp('homeZip', '郵便番号'), inp('homeAddr', '住所')),
+      row('特徴', inp('feature')),
+      row('', h('label', { class: 'chk' }, h('input', { type: 'checkbox', name: 'hidden', checked: !!(c && c.hidden) }), '非表示にする（ふだんの顧客一覧に出さない）')),
+      h('p', { class: 'hint', text: '住所・メール・SNSは、必要な時だけ入れてください（持っている情報が少ないほど、漏れた時の被害が小さくなります）。' }),
+      h('p', { class: 'err', id: 'cf-err' }),
+      h('div', { class: 'actions' },
+        c ? h('button', { type: 'button', class: 'danger', text: 'このお客様の情報を消す', onclick: async () => {
+          if (!(await ask('お客様の情報を消します', sama(c) + 'の情報（お名前・電話・メモなど）を消します。元に戻せません。\n予約の記録は「お名前なし」として残ります。', { ok: '消す' }))) return;
+          try { await api('DELETE', '/customers/' + c.id); toast('消しました'); S.cEdit = null; S.cTab = 'list'; renderCustomers().catch(fail); } catch (e) { fail(e); }
+        } }) : null,
+        h('span', { class: 'sep' }),
+        h('button', { type: 'button', text: '戻る', onclick: () => { S.cEdit = null; if (S.cTab === 'new') S.cTab = 'list'; renderCustomers().catch(fail); } }),
+        c ? h('button', { type: 'button', text: 'この方の予約を入れる', onclick: () => { openForm(null, { date: S.today }); Object.assign(P.f, { customer: c, phone: c.phone, phone2: c.phone2, lastName: c.lastName, firstName: c.firstName, lastKana: c.lastKana, firstKana: c.firstKana, company: c.company }); renderPanel(); } }) : null,
+        h('button', { class: 'blue', text: c ? '保存' : '登録' })));
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(form), body = { tags: attrs, hidden: fd.get('hidden') === 'on' };
+      for (const k of ['lastKana', 'firstKana', 'lastName', 'firstName', 'phone', 'phone2', 'company', 'memo', 'allergy', 'anniv', 'receiptName', 'dept', 'title', 'email', 'email2', 'twitter', 'facebook', 'workZip', 'workAddr', 'homeZip', 'homeAddr', 'feature']) body[k] = fd.get(k) || '';
+      try {
+        const r = await api(c ? 'PUT' : 'POST', '/customers' + (c ? '/' + c.id : ''), body);
+        toast(c ? '保存しました' : '登録しました'); S.cEdit = r.customer.id; S.cTab = r.customer.hidden ? 'hidden' : 'list'; renderCustomers().catch(fail);
+      } catch (err) { $('#cf-err').textContent = err.message; }
+    });
+    box.append(form);
+    if (c) {
+      box.append(h('div', { class: 'card', style: 'max-width:760px;margin-top:12px' }, h('h3', { text: '来店の履歴（来店 ' + c.visits + '回・予約取消 ' + c.cancels + '回・No Show ' + c.noshows + '回）' }),
+        h('div', { class: 'table-wrap' }, h('table', { class: 'tbl' }, h('thead', null, h('tr', null, ['来店日時', '人数', 'テーブル', 'コース', '状態'].map((x) => h('th', { text: x })))),
+          h('tbody', null, history.length ? history.map((r) => h('tr', { class: 'click', onclick: () => openReservation({ ...r, customer: c, flags: r.flags || [] }) }, h('td', { text: mdw(r.date) + ' ' + r.time }), h('td', { text: guestsText(r) }), h('td', { text: tableNames(r.tableIds) || 'ウェイティング' }), h('td', { text: r.courses.map((x) => courseName(x.courseId)).join(', ') }), h('td', null, h('span', { class: 'pill ' + r.status, text: STATUS[r.status] }))))
+            : h('tr', null, h('td', { colspan: 5, class: 'muted', text: '予約の記録はまだありません' })))))));
+    }
   }
 
-  const cdlg = $('#dlg-cust'), cform = $('#cust-form');
-  let cEditing = null;
-  function openCust(c) {
-    cEditing = c; const f = cform.elements;
-    $('#cust-title').textContent = c ? 'お客様の情報（No.' + c.no + '）' : 'お客様を登録';
-    for (const k of ['name', 'kana', 'phone', 'company', 'anniv', 'allergy', 'memo']) f[k].value = c ? c[k] || '' : '';
-    f.tags.value = c ? c.tags.join('、') : '';
-    $('#cust-del').hidden = !c; $('#cust-err').textContent = '';
-    cdlg.showModal(); f.name.focus();
+  // ---------- 分析 ----------
+  $$('#a-tabs button').forEach((b) => b.addEventListener('click', () => { S.aTab = b.dataset.tab; renderAnalytics().catch(fail); }));
+  function niceMax(v) { if (v <= 5) return 5; const p = Math.pow(10, Math.floor(Math.log10(v))); for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p; return v; }
+  // 棒（組数）と線（人数）のグラフ。stacked＝積み上げ、percent＝100%積み上げ
+  function chart(o) {
+    const labels = o.labels, bars = o.series.filter((s) => s.type !== 'line'), lines = o.series.filter((s) => s.type === 'line');
+    const many = labels.length > 12;
+    const W = Math.max(560, labels.length * (many ? 26 : 60) + 90), H = o.height || 240, padL = 44, padR = lines.length ? 44 : 16, padT = 12, padB = many ? 58 : 30;
+    const iw = W - padL - padR, ih = H - padT - padB;
+    let maxL = 0;
+    labels.forEach((_, i) => { const vals = bars.map((s) => s.values[i] || 0); maxL = Math.max(maxL, o.stacked ? vals.reduce((a, b) => a + b, 0) : Math.max(0, ...vals)); });
+    maxL = o.percent ? 100 : niceMax(maxL);
+    const maxR = niceMax(Math.max(0, ...lines.flatMap((s) => s.values)));
+    const g = sv('svg', { width: W, height: H, viewBox: '0 0 ' + W + ' ' + H, role: 'img', 'aria-label': o.title || 'グラフ' });
+    for (let k = 0; k <= 5; k++) {
+      const y = padT + ih - (ih * k) / 5;
+      g.append(sv('line', { x1: padL, x2: W - padR, y1: y, y2: y, stroke: '#e5e7eb' }));
+      g.append(sv('text', { x: padL - 6, y: y + 3, 'text-anchor': 'end', 'font-size': 10, fill: '#6b7280' }, (o.percent ? Math.round(maxL * k / 5) + '%' : Math.round((maxL * k / 5) * 10) / 10 + (o.unitL || '組'))));
+      if (lines.length) g.append(sv('text', { x: W - padR + 6, y: y + 3, 'font-size': 10, fill: '#6b7280' }, Math.round((maxR * k / 5) * 10) / 10 + (o.unitR || '名')));
+    }
+    const band = iw / labels.length;
+    labels.forEach((lab, i) => {
+      const cx = padL + band * i + band / 2;
+      let acc = 0;
+      const sum = bars.reduce((a, s) => a + (s.values[i] || 0), 0);
+      bars.forEach((s, j) => {
+        let v = s.values[i] || 0;
+        if (o.percent) v = sum ? (v / sum) * 100 : 0;
+        const bw = o.stacked ? Math.min(30, band * 0.6) : Math.min(22, (band * 0.7) / bars.length);
+        const x = o.stacked ? cx - bw / 2 : cx - (bw * bars.length) / 2 + bw * j;
+        const bh = maxL ? (v / maxL) * ih : 0;
+        const y = padT + ih - (o.stacked ? acc + bh : bh);
+        if (bh > 0) g.append(sv('rect', { x, y, width: bw, height: bh, fill: s.color }));
+        if (o.stacked) acc += bh;
+      });
+      const tx = sv('text', { x: cx, y: padT + ih + 14, 'font-size': 10, fill: '#4b5563', 'text-anchor': many ? 'end' : 'middle' }, lab);
+      if (many) tx.setAttribute('transform', 'rotate(-45 ' + cx + ' ' + (padT + ih + 14) + ')');
+      g.append(tx);
+    });
+    for (const s of lines) {
+      const pts = s.values.map((v, i) => (padL + band * i + band / 2) + ',' + (padT + ih - (maxR ? (v / maxR) * ih : 0)));
+      g.append(sv('polyline', { points: pts.join(' '), fill: 'none', stroke: s.color, 'stroke-width': 1.5 }));
+      pts.forEach((p) => { const [x, y] = p.split(','); g.append(sv('circle', { cx: x, cy: y, r: 3, fill: s.color })); });
+    }
+    return h('div', { class: 'card' }, o.title ? h('h3', { text: o.title }) : null, h('div', { class: 'chart' }, g),
+      h('div', { class: 'legend' }, o.series.map((s) => h('span', null, h('i', { style: 'background:' + s.color }), s.name))));
   }
-  $('#cust-cancel').addEventListener('click', () => cdlg.close());
-  cform.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const f = cform.elements;
-    const body = { tags: f.tags.value.split(/[、,，\s]+/).filter(Boolean) };
-    for (const k of ['name', 'kana', 'phone', 'company', 'anniv', 'allergy', 'memo']) body[k] = f[k].value;
-    try {
-      const r = await api(cEditing ? 'PUT' : 'POST', '/customers' + (cEditing ? '/' + cEditing.id : ''), body);
-      S.custSel = r.customer.id; cdlg.close(); toast('保存しました'); loadCustomers().catch(fail);
-    } catch (err) { $('#cust-err').textContent = err.message; }
-  });
-  $('#cust-del').addEventListener('click', async () => {
-    if (!cEditing) return;
-    if (!confirm('No.' + cEditing.no + ' ' + (cEditing.name || '') + ' 様の情報（お名前・電話・メモ）を消します。元に戻せません。\n予約の記録は「お名前なし」として残り、件数の集計には使われます。\n消しますか？')) return;
-    try { await api('DELETE', '/customers/' + cEditing.id); S.custSel = null; cdlg.close(); toast('消しました'); loadCustomers().catch(fail); } catch (err) { fail(err); }
-  });
+  function pie(title, rows, key) {
+    const total = rows.reduce((a, r) => a + r[key], 0);
+    let acc = 0;
+    const stops = rows.map((r, i) => { const a = acc; acc += total ? (r[key] / total) * 360 : 0; return COLORS[i % COLORS.length] + ' ' + a + 'deg ' + acc + 'deg'; });
+    const p = total ? h('div', { class: 'pie', style: 'background:conic-gradient(' + stops.join(',') + ')' }) : h('div', { class: 'pie empty', text: 'データがありません' });
+    return h('div', { class: 'card' }, h('h3', { text: title }), h('div', { class: 'pie-wrap' }, p,
+      h('div', { class: 'legend' }, rows.map((r, i) => h('span', null, h('i', { style: 'background:' + COLORS[i % COLORS.length] }), r.name)))));
+  }
+  function table(head, rows, opt) {
+    return h('div', { class: 'table-wrap' + (opt && opt.flat ? '' : ''), style: 'border:none' }, h('table', { class: 'tbl' }, h('thead', null, h('tr', null, head.map((x, i) => h('th', { class: i && !(opt && opt.left) ? 'num' : '', text: x })))),
+      h('tbody', null, rows.map((r) => h('tr', { class: r.total ? 'total' : '' }, r.cells.map((x, i) => h('td', { class: i && !(opt && opt.left) ? 'num' : '' }, x)))))));
+  }
+  function ymSelects(ym, onApply, label) {
+    const ysel = h('select', null, [-2, -1, 0, 1].map((n) => { const y = +S.today.slice(0, 4) + n; return h('option', { value: y, text: y }); }));
+    const msel = h('select', null, Array.from({ length: 12 }, (_, i) => h('option', { value: i + 1, text: i + 1 })));
+    ysel.value = +ym.slice(0, 4); msel.value = +ym.slice(5, 7);
+    return [label ? h('span', { text: label }) : null, ysel, h('span', { text: '年' }), msel, h('span', { text: '月' }), { ysel, msel, onApply }];
+  }
+  function applyBtn(fn) { return h('button', { class: 'blue', text: '適用', onclick: fn }); }
+  const pct = (a, b) => (b ? (Math.round((a / b) * 1000) / 10).toFixed(1) : 'NaN') + '%';
+  const now = () => h('div', { class: 'updated', text: '更新日時: ' + new Date().toLocaleString('ja-JP') });
 
-  // ---------- 集計 ----------
-  let statsInit = false;
-  async function initStats() {
-    if (!statsInit) { const d = parseDate(S.today); $('#s-from').value = fmtDate(new Date(d.getFullYear(), d.getMonth(), 1)); $('#s-to').value = fmtDate(new Date(d.getFullYear(), d.getMonth() + 1, 0)); statsInit = true; }
-    const r = await api('GET', '/stats?from=' + $('#s-from').value + '&to=' + $('#s-to').value);
-    const t = r.totals, box = $('#s-body'); box.replaceChildren();
-    const pct = (a, b) => (b ? Math.round((a / b) * 1000) / 10 : 0) + '%';
-    const card = (k, v, u) => h('div', { class: 'stat' }, h('div', { class: 'k', text: k }), h('span', { class: 'v', text: v }), h('span', { class: 'u', text: u || '' }));
-    box.append(h('div', { class: 'stat-cards' },
-      card('予約（キャンセル除く）', t.groups, '組'), card('人数', t.guests, '名'), card('昼', t.lunchGroups + '組', t.lunchGuests + '名'), card('夜', t.dinnerGroups + '組', t.dinnerGuests + '名'),
-      card('キャンセル率', pct(t.cancels + t.noshows, t.all), '（無断 ' + t.noshows + '件）'),
-      card('来店のうち初めて', pct(t.firstTime, t.visitedGroups), t.firstTime + '組'), card('来店のうち2回目以上', pct(t.repeat, t.visitedGroups), t.repeat + '組'), card('お名前なしの来店', t.noName, '組')));
-    const two = h('div', { class: 'two' });
-    const srcP = h('div', { class: 'panel' }, h('h3', { text: '予約の経路' }));
-    const maxS = Math.max(1, ...Object.values(r.bySource).map((x) => x.all));
-    for (const [k, v] of Object.entries(r.bySource).sort((a, b) => b[1].all - a[1].all)) srcP.append(bar(k, v.all / maxS, v.groups + '組 ' + v.guests + '名' + (v.cancels + v.noshows ? '・取消' + (v.cancels + v.noshows) : '')));
-    if (!Object.keys(r.bySource).length) srcP.append(h('p', { class: 'muted', text: 'この期間の予約はありません' }));
-    const wdP = h('div', { class: 'panel' }, h('h3', { text: '曜日（キャンセル除く）' }));
-    const maxW = Math.max(1, ...r.byWeekday.map((x) => x.groups));
-    [1, 2, 3, 4, 5, 6, 0].forEach((i) => wdP.append(bar(WD[i] + '曜', r.byWeekday[i].groups / maxW, r.byWeekday[i].groups + '組 ' + r.byWeekday[i].guests + '名')));
-    two.append(srcP, wdP);
-    const rp = r.repeat;
-    box.append(two, h('div', { class: 'panel' }, h('h3', { text: 'お客様の来店回数（全期間・予約で来店したお客様）' }),
-      h('p', { text: '来店したお客様 ' + rp.customers + '名のうち、1回だけ ' + rp.once + '名（' + pct(rp.once, rp.customers) + '）、2回以上 ' + rp.twoPlus + '名（' + pct(rp.twoPlus, rp.customers) + '）、5回以上 ' + rp.fivePlus + '名（' + pct(rp.fivePlus, rp.customers) + '）' }),
-      h('p', { class: 'hint', text: '状態を「来店」「退店」にした予約だけを来店として数えます。予約なしのお客様（飛び込み）は、予約として入れた時だけ数に入ります。' })));
+  async function renderAnalytics() {
+    $$('#a-tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.aTab));
+    const box = $('#a-body'); box.replaceChildren();
+    const ap = S.ap, ymNow = S.today.slice(0, 7);
+    const t = S.aTab;
+    if (t === 'top') {
+      const p = ap.top || (ap.top = { week: 0 });
+      const r = await api('GET', '/analytics?' + qs({ kind: 'top', week: p.week, today: S.today }));
+      const wl = ['先週', '今週', '来週'], ml = ['先月', '今月', '来月'];
+      box.append(h('div', { class: 'cards2' },
+        h('div', { class: 'card' }, table(['週の予約', '組数', '人数'], r.weeks.map((w, i) => ({ cells: [wl[i] + ' (' + mdw(w.from).replace(/\(.\)/, '') + ' - ' + mdw(w.to).replace(/\(.\)/, '') + ')', w.groups, w.guests] })))),
+        h('div', { class: 'card' }, table(['月の予約', '組数', '人数'], r.months.map((m, i) => ({ cells: [ml[i] + ' (' + ymLabel(m.ym) + ')', m.groups, m.guests] }))))),
+      chart({ title: '予約状況 (本日を中心とした前後7日分)', labels: r.days.map((d) => mdw(d.date).replace(/\(.\)/, '')), series: [{ name: '組数', color: '#8cc63f', values: r.days.map((d) => d.groups) }, { name: '人数', type: 'line', color: '#9ca3af', values: r.days.map((d) => d.guests) }] }));
+      const wk = h('div', { class: 'opts' }, ['先週', '今週', '来週', '再来週'].map((l, i) => h('label', null, h('input', { type: 'radio', name: 'cw', checked: p.week === i - 1, onchange: () => { p.week = i - 1; renderAnalytics().catch(fail); } }), l)));
+      const c = r.course;
+      box.append(h('div', { class: 'card' }, h('h3', { text: 'コース注文状況', style: 'font-size:18px;font-weight:700' }), wk,
+        table(['コース名', ...c.days.map((d) => mdw(d).replace(/\(.\)/, '')), '合計'], [
+          ...c.rows.map((x) => ({ cells: [x.name + ' (' + yen(x.price) + ')', ...x.days, x.days.reduce((a, b) => a + b, 0)] })),
+          { total: true, cells: ['合計', ...c.days.map((_, i) => c.rows.reduce((a, x) => a + x.days[i], 0)), c.rows.reduce((a, x) => a + x.days.reduce((p2, q2) => p2 + q2, 0), 0)] },
+          { cells: ['(当日の予約人数)', ...c.dayGuests.map((g) => '(' + g + ')'), '(' + c.dayGuests.reduce((a, b) => a + b, 0) + ')'] }]),
+        c.rows.length ? null : h('p', { class: 'hint', text: 'コースは「設定」で登録します' })), now());
+      return;
+    }
+    if (t === 'counts') {
+      const p = ap.counts || (ap.counts = { mode: 'day', basis: 'visit', year: +ymNow.slice(0, 4), month: +ymNow.slice(5, 7) });
+      const r = await api('GET', '/analytics?' + qs({ kind: 'counts', ...p, today: S.today }));
+      const radio = (name, val, label, key) => h('label', null, h('input', { type: 'radio', name, checked: p[key] === val, onchange: () => { p[key] = val; renderAnalytics().catch(fail); } }), label);
+      const [ys] = [ymSelects(p.year + '-' + pad(p.month))];
+      const ctl = ys.pop();
+      box.append(h('div', { class: 'card' },
+        h('div', { class: 'opts' }, h('span', { text: '集計の種類:' }), radio('cm', 'day', '日別', 'mode'), radio('cm', 'month', '月別', 'mode'), radio('cm', 'hour', '時間帯別', 'mode'), radio('cm', 'weekday', '曜日別', 'mode'), radio('cm', 'lead', '何日前に予約しているか', 'mode')),
+        h('div', { class: 'opts' }, h('span', { text: '対象とする日時:' }), radio('cb', 'visit', '来店日時', 'basis'), radio('cb', 'accept', '受付日時', 'basis')),
+        h('div', { class: 'opts' }, ...ys, applyBtn(() => { p.year = +ctl.ysel.value; p.month = +ctl.msel.value; renderAnalytics().catch(fail); }))),
+      chart({ title: '予約数', labels: r.rows.map((x) => x.label), series: [{ name: '組数', color: '#8cc63f', values: r.rows.map((x) => x.groups) }, { name: '人数', type: 'line', color: '#9ca3af', values: r.rows.map((x) => x.guests) }] }),
+      h('div', { class: 'card' }, table([p.mode === 'day' ? '日付' : p.mode === 'month' ? '月' : p.mode === 'hour' ? '時間帯' : p.mode === 'weekday' ? '曜日' : '何日前', '組数', '人数'], [...r.rows.map((x) => ({ cells: [x.label, x.groups, x.guests] })), { total: true, cells: ['合計', r.rows.reduce((a, x) => a + x.groups, 0), r.rows.reduce((a, x) => a + x.guests, 0)] }])), now());
+      return;
+    }
+    if (t === 'sources' || t === 'cancels') {
+      const p = ap[t] || (ap[t] = { from: C.ymAdd(ymNow, -5), to: ymNow });
+      const r = await api('GET', '/analytics?' + qs({ kind: t, from: p.from, to: p.to, today: S.today }));
+      const a = ymSelects(p.from), ac = a.pop(), b = ymSelects(p.to), bc = b.pop();
+      box.append(h('div', { class: 'card' },
+        t === 'sources' ? h('div', { class: 'opts' }, h('label', null, h('input', { type: 'radio', checked: true }), '予約経路（月別）'), h('label', null, h('input', { type: 'radio', disabled: true }), '予約経路（全店舗）')) : null,
+        h('div', { class: 'opts' }, ...a, h('span', { text: '-' }), ...b, applyBtn(() => { p.from = ac.ysel.value + '-' + pad(ac.msel.value); p.to = bc.ysel.value + '-' + pad(bc.msel.value); renderAnalytics().catch(fail); }), h('span', { class: 'hint', text: '※最長13ヶ月まで期間指定が可能' }))));
+      if (t === 'sources') {
+        const srcs = r.sources;
+        box.append(chart({ title: '予約経路', stacked: true, labels: r.rows.map((x) => ymLabel(x.ym)), series: srcs.map((s, i) => ({ name: s, color: COLORS[i], values: r.rows.map((x) => x.by[s].groups) })) }));
+        const rows = [];
+        const cell = (v, tot) => v + ' 組 (' + pct(v, tot) + ')';
+        for (const x of r.rows) { rows.push({ cells: [ymLabel(x.ym), ...srcs.map((s) => cell(x.by[s].groups, x.total.groups)), x.total.groups + ' 組'] }); rows.push({ cells: ['', ...srcs.map((s) => x.by[s].guests + ' 名 (' + pct(x.by[s].guests, x.total.guests) + ')'), x.total.guests + ' 名'] }); }
+        const tg = r.rows.reduce((q2, x) => q2 + x.total.groups, 0), tp = r.rows.reduce((q2, x) => q2 + x.total.guests, 0);
+        rows.push({ total: true, cells: ['合計', ...srcs.map((s) => cell(r.rows.reduce((q2, x) => q2 + x.by[s].groups, 0), tg)), tg + ' 組'] });
+        rows.push({ total: true, cells: ['', ...srcs.map((s) => r.rows.reduce((q2, x) => q2 + x.by[s].guests, 0) + ' 名 (' + pct(r.rows.reduce((q2, x) => q2 + x.by[s].guests, 0), tp) + ')'), tp + ' 名'] });
+        box.append(h('div', { class: 'card' }, table(['日付', ...srcs, '合計'], rows)), now());
+      } else {
+        box.append(chart({ title: 'キャンセル', stacked: true, labels: r.rows.map((x) => ymLabel(x.ym)), series: [{ name: '予約取消', color: '#e8562a', values: r.rows.map((x) => x.cancel.groups) }, { name: 'No Show', color: '#f08080', values: r.rows.map((x) => x.noshow.groups) }, { name: 'ウェブ取消', color: '#f9c0cb', values: r.rows.map((x) => x.web.groups) }, { name: 'キャンセル率', type: 'line', color: '#374151', values: r.rows.map((x) => (x.all.groups ? (x.total.groups / x.all.groups) * 100 : 0)) }], unitR: '%' }));
+        const rows = [];
+        const sum = (k, f2) => r.rows.reduce((q2, x) => q2 + x[k][f2], 0);
+        for (const x of r.rows) {
+          rows.push({ cells: [ymLabel(x.ym), x.cancel.groups + ' 組 (' + pct(x.cancel.groups, x.all.groups) + ')', x.noshow.groups + ' 組 (' + pct(x.noshow.groups, x.all.groups) + ')', '0 組 (' + pct(0, x.all.groups) + ')', x.total.groups + ' 組', pct(x.total.groups, x.all.groups)] });
+          rows.push({ cells: ['', x.cancel.guests + ' 名 (' + pct(x.cancel.guests, x.all.guests) + ')', x.noshow.guests + ' 名 (' + pct(x.noshow.guests, x.all.guests) + ')', '0 名 (' + pct(0, x.all.guests) + ')', x.total.guests + ' 名', pct(x.total.guests, x.all.guests)] });
+        }
+        rows.push({ total: true, cells: ['合計', sum('cancel', 'groups') + ' 組 (' + pct(sum('cancel', 'groups'), sum('all', 'groups')) + ')', sum('noshow', 'groups') + ' 組 (' + pct(sum('noshow', 'groups'), sum('all', 'groups')) + ')', '0 組', sum('total', 'groups') + ' 組', pct(sum('total', 'groups'), sum('all', 'groups'))] });
+        box.append(h('div', { class: 'card' }, table(['日付', '予約取消', 'No Show', 'ウェブ取消', '合計', 'キャンセル率'], rows)), now());
+      }
+      return;
+    }
+    if (t === 'visits') {
+      const p = ap.visits || (ap.visits = { months: 6, pct: true });
+      const r = await api('GET', '/analytics?' + qs({ kind: 'visits', months: p.months, today: S.today }));
+      box.append(h('div', { class: 'card' },
+        h('div', { class: 'opts' }, h('label', null, h('input', { type: 'radio', name: 'vm', checked: p.months === 6, onchange: () => { p.months = 6; } }), '6ヶ月'), h('label', null, h('input', { type: 'radio', name: 'vm', checked: p.months === 13, onchange: () => { p.months = 13; } }), '13ヶ月'), applyBtn(() => renderAnalytics().catch(fail))),
+        h('div', { class: 'opts' }, h('label', null, h('input', { type: 'radio', name: 'vp', checked: p.pct, onchange: () => { p.pct = true; renderAnalytics().catch(fail); } }), '100%積み上げ縦棒'), h('label', null, h('input', { type: 'radio', name: 'vp', checked: !p.pct, onchange: () => { p.pct = false; renderAnalytics().catch(fail); } }), '積み上げ縦棒 (実数)'))),
+      chart({ title: '来店回数', stacked: true, percent: p.pct, unitL: '組', labels: r.rows.map((x) => ymLabel(x.ym)), series: ['1回目', '2回目', '3回目', '4回目以上'].map((n, i) => ({ name: n, color: ['#fde9b0', '#f5c242', '#f59e0b', '#e8562a'][i], values: r.rows.map((x) => x.counts[i]) })) }),
+      h('div', { class: 'card' }, table(['日付', '1回目', '2回目', '3回目', '4回目以上'], [...r.rows.map((x) => ({ cells: [ymLabel(x.ym), ...x.counts] })), { total: true, cells: ['合計', ...[0, 1, 2, 3].map((i) => r.rows.reduce((a, x) => a + x.counts[i], 0))] }])),
+      h('p', { class: 'hint', text: '状態を「来店」「退店」にした予約を、お客様ごとに何回目の来店かで数えます。お名前のない予約は入りません。' }), now());
+      return;
+    }
+    if (['staff', 'course', 'free', 'tags'].includes(t)) {
+      const p = ap[t] || (ap[t] = { ym: ymNow });
+      const r = await api('GET', '/analytics?' + qs({ kind: t, ym: p.ym, today: S.today }));
+      const a = ymSelects(p.ym), ac = a.pop();
+      const title = { staff: '担当者', course: 'コース', free: S.boot.free.label, tags: '予約タグ' }[t];
+      box.append(h('div', { class: 'card' }, h('div', { class: 'opts' }, ...a, applyBtn(() => { p.ym = ac.ysel.value + '-' + pad(ac.msel.value); renderAnalytics().catch(fail); }))));
+      const key = t === 'course' ? 'guests' : 'groups';
+      box.append(pie(title, r.rows, key));
+      if (t === 'course') box.append(h('div', { class: 'card' }, table(['#', '名前', '人数', '金額'], [...r.rows.map((x, i) => ({ cells: [i + 1, x.name, x.guests, yen(x.amount)] })), { total: true, cells: ['', '合計', r.rows.reduce((q2, x) => q2 + x.guests, 0), yen(r.rows.reduce((q2, x) => q2 + x.amount, 0))] }], { left: true })));
+      else if (t === 'free') box.append(h('div', { class: 'card' }, table(['#', '名前', '組数', '人数'], r.rows.map((x, i) => ({ cells: [i + 1, x.name, x.groups, x.guests] })), { left: true }), S.boot.free.options.length ? null : h('p', { class: 'hint', text: '自由設定欄の選択肢は「設定」で決めます' })));
+      else box.append(h('div', { class: 'card' }, table(['#', '名前', '組数'], r.rows.map((x, i) => ({ cells: [i + 1, x.name, x.groups] })), { left: true })));
+      box.append(now());
+      return;
+    }
+    if (t === 'params') {
+      const a = ymSelects(ymNow); a.pop();
+      box.append(h('div', { class: 'card' }, h('div', { class: 'opts' }, h('span', { text: '対象とする日時:' }), h('label', null, h('input', { type: 'radio', checked: true }), '来店日時'), h('label', null, h('input', { type: 'radio' }), '受付日時')), h('div', { class: 'opts' }, ...a, applyBtn(() => {}))),
+        pie('カスタムパラメーター', [], 'groups'),
+        h('div', { class: 'card' }, table(['#', '名前', '組数', '人数'], [{ total: true, cells: ['', '合計', 0, 0] }], { left: true }),
+          h('p', { class: 'hint', text: 'カスタムパラメーターは、ネット予約（ウェブ予約）がどこから来たかを数える機能です。ネット予約にはインターネット上の受け口が要るため、この台帳ではまだ使えません（手順書「インターネットの受け口が要る機能」を参照）。' })), now());
+    }
   }
-  function bar(label, ratio, val) { return h('div', { class: 'bar-row' }, h('span', { text: label }), h('div', { class: 'track' }, h('div', { class: 'fill', style: 'width:' + Math.round(ratio * 100) + '%' })), h('span', { class: 'muted', text: val })); }
-  $('#s-go').addEventListener('click', () => initStats().catch(fail));
-  $('#s-csv').addEventListener('click', async () => {
-    try {
-      if (!L) return showGate();
-      const from = $('#s-from').value, to = $('#s-to').value;
-      const csv = L.posLinkCsv(from, to);
-      await persist();
-      const r = await shareOrDownload('レジ連携用_' + from + '_' + to + '.csv', new Blob([csv], { type: 'text/csv' }));
-      if (r !== 'aborted') toast('書き出しました（お名前・電話番号は入っていません）');
-    } catch (e) { fail(e); }
-  });
+
+  // ---------- 印刷マネージャー ----------
+  $$('#p-tabs button').forEach((b) => b.addEventListener('click', () => { S.pTab = b.dataset.tab; renderPrint().catch(fail); }));
+  async function renderPrint() {
+    $$('#p-tabs button').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.pTab));
+    const box = $('#p-form'); box.replaceChildren();
+    const date = h('input', { type: 'date', value: S.printDate || S.date || S.today });
+    const hours = Array.from({ length: 30 }, (_, i) => i);
+    const from = h('select', null, hours.map((x) => h('option', { value: x, text: x + '時から' }))), to = h('select', null, hours.map((x) => h('option', { value: x + 1, text: (x + 1) + '時まで' })));
+    from.value = Math.floor(toMin(S.boot.settings.lunchEnd) / 60); to.value = 24;
+    const paper = h('select', null, ['A4・タテ', 'A4・ヨコ'].map((x) => h('option', { value: x, text: x })));
+    const ck = (label, on) => h('label', { class: 'chk' }, h('input', { type: 'checkbox', checked: on !== false, 'data-k': label }), label);
+    const checks = S.pTab === 'list'
+      ? ['本日の情報', 'ご予約者様名の表示は漢字を優先', 'VIP/要注意マーク', '会社名', '来店回数', '電話番号', 'お客様属性', 'コースとお客様のアレルギー情報', '予約タグ', '自由設定欄', '予約メモ', '受付情報', '書き込み用の空白行', 'コースの集計ページ']
+      : ['本日の情報', 'ご予約者様名の表示は漢字を優先', '来店回数', '予約タグ'];
+    box.append(h('p', { text: '印刷したい日時、用紙レイアウト、表示オプションを選択し「印刷用PDFを出力」ボタンを押してください。（印刷の画面で「PDFとして保存」も選べます）' }),
+      h('div', { class: 'row' }, h('select', { disabled: true }, h('option', { text: S.boot.settings.storeName || 'この店舗' })), date),
+      h('div', { class: 'row' }, from, to, paper),
+      h('div', { class: 'checks' }, checks.map((x) => ck(x))),
+      h('div', null, h('button', { class: 'primary', text: '印刷用PDFを出力', onclick: async () => {
+        const opt = {}; $$('input[data-k]', box).forEach((c) => { opt[c.dataset.k] = c.checked; });
+        try { await buildPrint(date.value, +from.value, +to.value, paper.value, opt); window.print(); } catch (e) { fail(e); }
+      } })));
+  }
+  async function buildPrint(date, fromH, toH, paper, opt) {
+    const r = await api('GET', '/reservations?from=' + date + '&to=' + date);
+    const list = r.reservations.filter((x) => ACTIVE.has(x.status) && toMin(x.time) >= fromH * 60 && toMin(x.time) < toH * 60);
+    const area = $('#print-area'); area.replaceChildren();
+    const nm = (c) => (c ? (opt['ご予約者様名の表示は漢字を優先'] ? c.name || c.kana : c.kana || c.name) || c.phone : 'お名前なし');
+    const head = h('div', null, h('h1', { text: (S.boot.settings.storeName || '予約台帳') + '　' + jpDate(date) + '　' + fromH + '時〜' + toH + '時（' + list.length + '組 ' + list.reduce((a, x) => a + x.guests, 0) + '名）' }),
+      opt['本日の情報'] && r.info ? h('p', { text: '本日の情報：' + r.info }) : null);
+    const sheet = h('div', { class: 'pg' }, head);
+    if (S.pTab === 'list') {
+      const cols = ['時間', 'ご予約者', '人数', 'テーブル'];
+      if (opt['来店回数']) cols.push('来店'); if (opt['電話番号']) cols.push('電話'); if (opt['会社名']) cols.push('会社名'); if (opt['お客様属性']) cols.push('お客様属性');
+      if (opt['コースとお客様のアレルギー情報']) cols.push('コース・アレルギー'); if (opt['予約タグ']) cols.push('予約タグ'); if (opt['自由設定欄']) cols.push(S.boot.free.label); if (opt['予約メモ']) cols.push('メモ'); if (opt['受付情報']) cols.push('受付');
+      const rows = list.map((x) => {
+        const c = x.customer, cells = [x.time + '-' + toTime(toMin(x.time) + x.stayMin), (opt['VIP/要注意マーク'] && c && c.tags.some((t) => /^(vip|要注意)$/i.test(t)) ? '★' : '') + nm(c) + ' 様', guestsText(x), tableNames(x.tableIds) || '未定'];
+        if (opt['来店回数']) cells.push(c ? c.visits : ''); if (opt['電話番号']) cells.push(c ? c.phone : ''); if (opt['会社名']) cells.push(c ? c.company : ''); if (opt['お客様属性']) cells.push(c ? c.tags.join('・') : '');
+        if (opt['コースとお客様のアレルギー情報']) cells.push(x.courses.map((k) => courseName(k.courseId) + '×' + k.count).join(', ') + (c && c.allergy ? ' ⚠' + c.allergy : '')); if (opt['予約タグ']) cells.push(x.tags.join('・'));
+        if (opt['自由設定欄']) cells.push(x.free); if (opt['予約メモ']) cells.push(x.memo); if (opt['受付情報']) cells.push(stamp(x.createdAt) + (x.staff ? ' ' + x.staff : ''));
+        return cells;
+      });
+      if (opt['書き込み用の空白行']) for (let i = 0; i < 5; i++) rows.push(cols.map(() => ' '));
+      sheet.append(h('table', null, h('thead', null, h('tr', null, cols.map((x) => h('th', { text: x })))), h('tbody', null, rows.map((cells) => h('tr', null, cells.map((x) => h('td', { text: x })))))));
+      area.append(sheet);
+      if (opt['コースの集計ページ']) {
+        const sum = new Map();
+        for (const x of list) for (const k of x.courses) sum.set(k.courseId, (sum.get(k.courseId) || 0) + k.count);
+        area.append(h('div', { class: 'pg' }, h('h1', { text: 'コースの集計　' + jpDate(date) }), h('table', null, h('thead', null, h('tr', null, h('th', { text: 'コース' }), h('th', { text: '人数' }))),
+          h('tbody', null, sum.size ? [...sum].map(([id, n]) => h('tr', null, h('td', { text: courseName(id) }), h('td', { text: n }))) : h('tr', null, h('td', { colspan: 2, text: 'コースの予約はありません' }))))));
+      }
+    } else {
+      const hrs = []; for (let x = fromH; x < toH; x++) hrs.push(x);
+      const tableEl = h('table', null, h('thead', null, h('tr', null, h('th', { text: 'テーブル' }), hrs.map((x) => h('th', { colspan: 2, text: x + ':00' })))));
+      const tb = h('tbody');
+      for (const t of S.boot.tables) {
+        const tr = h('tr', null, h('td', { text: t.name + '（' + capText(t) + '）' }));
+        const mine = list.filter((x) => x.tableIds.includes(t.id)).sort((a, b) => a.time.localeCompare(b.time));
+        let slot = fromH * 2;
+        for (const x of mine) {
+          const st = Math.max(fromH * 2, Math.floor(toMin(x.time) / 30)), en = Math.min(toH * 2, Math.ceil((toMin(x.time) + x.stayMin) / 30));
+          if (st < slot || en <= st) continue;
+          for (; slot < st; slot++) tr.append(h('td'));
+          tr.append(h('td', { colspan: en - st, style: 'background:#ddd', text: x.time + ' ' + nm(x.customer) + ' 様 ' + guestsText(x) + (opt['来店回数'] && x.customer ? '(' + x.customer.visits + ')' : '') + (opt['予約タグ'] && x.tags.length ? ' ' + x.tags.join('・') : '') }));
+          slot = en;
+        }
+        for (; slot < toH * 2; slot++) tr.append(h('td'));
+        tb.append(tr);
+      }
+      tableEl.append(tb); sheet.append(tableEl); area.append(sheet);
+    }
+    let pg = document.getElementById('page-size');
+    if (pg) pg.remove();
+    // 用紙の向き（CSPでstyle要素を足せないため、印刷の向きは印刷の画面で選んでもらう）
+    if (paper === 'A4・ヨコ') toast('印刷の画面で「横」を選んでください');
+    L._log('印刷', date); persist().catch(() => {});
+  }
+
+  // ---------- CSVダウンロード ----------
+  async function renderCsv() {
+    const box = $('#csv-body'); box.replaceChildren();
+    const y = h('select', null, [-1, 0, 1].map((n) => { const v = +S.today.slice(0, 4) + n; return h('option', { value: v, text: v }); }));
+    const m = h('select', null, Array.from({ length: 12 }, (_, i) => h('option', { value: i + 1, text: i + 1 })));
+    const d = h('select', null, Array.from({ length: 31 }, (_, i) => h('option', { value: i + 1, text: i + 1 })));
+    y.value = +S.today.slice(0, 4); m.value = +S.today.slice(5, 7); d.value = +S.today.slice(8, 10);
+    const dl = async (from, to, name) => {
+      try {
+        if (!(await ask('CSVを書き出します', 'このファイルには、お客様のお名前・電話番号が入ります。\nこの端末やお店のパソコンの中だけで使い、メールやAIなど外のサービスには送らないでください。', { ok: '書き出す' }))) return;
+        const csv = L.reservationsCsv(from, to); await persist();
+        const r = await shareOrDownload(name, new Blob([csv], { type: 'text/csv' }));
+        if (r !== 'aborted') toast('書き出しました');
+      } catch (e) { fail(e); }
+    };
+    const months = [];
+    for (let i = -11; i <= 3; i++) months.push(C.ymAdd(S.today.slice(0, 7), i));
+    const lastUpd = (ym) => { const xs = L.db.reservations.filter((r) => r.date.startsWith(ym)).map((r) => r.updatedAt).sort(); return xs.length ? new Date(xs[xs.length - 1]).toLocaleString('ja-JP') : '—'; };
+    box.append(h('div', { class: 'csv-sec' }, h('h3', { text: '店舗、日別を指定してダウンロード' }),
+      h('div', { class: 'opts' }, h('select', { disabled: true }, h('option', { text: S.boot.settings.storeName || 'この店舗' })), y, h('span', { text: '年' }), m, h('span', { text: '月' }), d, h('span', { text: '日' }),
+        h('button', { class: 'primary', text: 'ダウンロード', onclick: () => { const s = y.value + '-' + pad(m.value) + '-' + pad(d.value); if (!C.isDate(s)) return toast('日付が正しくありません', true); dl(s, s, '予約_' + s + '.csv'); } }))),
+    h('div', { class: 'csv-sec' }, h('h3', { text: '月別データをダウンロード' }),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'tbl' }, h('thead', null, h('tr', null, ['ファイル名', '更新日', ''].map((x) => h('th', { text: x })))),
+        h('tbody', null, months.reverse().map((ym) => h('tr', null, h('td', { text: ym.replace('-', '_') + '.csv' }), h('td', { text: lastUpd(ym) }),
+          h('td', null, h('button', { class: 'primary', text: 'ダウンロード', onclick: () => dl(ym + '-01', C.addDays(C.ymAdd(ym, 1) + '-01', -1), ym.replace('-', '_') + '.csv') })))))))),
+    h('div', { class: 'csv-sec' }, h('h3', { text: 'レジ連携用CSV（お名前・電話番号は入りません）' }), h('p', { class: 'hint', text: 'レジ（POS）のデータと突き合わせて、お客様ごとの注文の傾向を分析する時に使います。' }),
+      (() => { const a = h('input', { type: 'date', value: S.today.slice(0, 8) + '01' }), b = h('input', { type: 'date', value: S.today }); return h('div', { class: 'opts' }, a, h('span', { text: '〜' }), b, h('button', { text: '書き出す', onclick: async () => { try { const csv = L.posLinkCsv(a.value, b.value); await persist(); const r = await shareOrDownload('レジ連携用_' + a.value + '_' + b.value + '.csv', new Blob([csv], { type: 'text/csv' })); if (r !== 'aborted') toast('書き出しました'); } catch (e) { fail(e); } } })); })()));
+  }
+
+  // ---------- ウェブ予約ウィジェット（インターネット上の受け口が要るため、まだ使えない） ----------
+  async function renderWidget() {
+    $('#widget-body').replaceChildren(h('div', { class: 'csv-sec' },
+      h('p', { text: 'お店のホームページやGoogleマップに「ウェブ予約」の窓口を置く機能です。' }),
+      h('p', { text: 'お客様のスマホから予約を受けるには、インターネット上に受け口（予約を受け取って、iPadへ暗号化して届ける場所）が必要です。この台帳はお客様の情報をiPadの外に置かない作りのため、受け口を用意するまで、この機能は使えません。' }),
+      h('p', { class: 'hint', text: '受け口の作り方・守り方・費用・手順は、手順書「インターネットの受け口が要る機能」（予約台帳のフォルダの「2026-11-25_手順書_インターネットの受け口が要る機能.md」）にまとめています。' }),
+      h('div', { class: 'pie empty', style: 'width:280px;height:200px;border-radius:6px', text: 'ウィジェットのプレビュー（準備中）' })));
+  }
 
   // ---------- 設定 ----------
   async function renderSettings() {
@@ -987,89 +1219,94 @@
     const st = S.boot.settings, box = $('#set-body'); box.replaceChildren();
     const inp = (name, val, type, extra) => h('input', { name, value: val, type: type || 'text', ...(extra || {}) });
     const lab = (t, el) => h('label', null, t, el);
+    const save = async (body, msg) => { try { S.boot = await api('PUT', '/settings', body); $('#store-name').textContent = S.boot.settings.storeName || '予約台帳'; toast(msg || '保存しました'); renderSettings().catch(fail); } catch (err) { fail(err); } };
 
-    const sform = h('form', { class: 'panel' },
-      h('h3', { text: 'お店' }),
+    const sform = h('form', { class: 'panel-box' }, h('h3', { text: 'お店' }),
       h('div', { class: 'row' }, lab('お店の名前（画面の左上に出ます）', inp('storeName', st.storeName)), lab('開店', inp('open', st.open, 'time')), lab('閉店', inp('close', st.close, 'time')), lab('昼と夜の境目', inp('lunchEnd', st.lunchEnd, 'time'))),
       h('div', { class: 'row' }, lab('ふつうの滞在時間（分）', inp('defaultStayMin', st.defaultStayMin, 'number', { min: 15, max: 720, step: 15 })),
         lab('操作がない時に自動でロック（分）', inp('autoLockMin', st.autoLockMin, 'number', { min: 1, max: 1440 })),
         lab('お客様情報の保管年数（最後の予約から）', inp('retentionYears', st.retentionYears, 'number', { min: 1, max: 20 }))),
       h('div', { class: 'actions' }, h('span', { class: 'sep' }), h('button', { class: 'primary', text: '保存' })));
-    sform.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const f = sform.elements;
-      const s = {}; ['storeName', 'open', 'close', 'lunchEnd'].forEach((k) => { s[k] = f[k].value; }); ['defaultStayMin', 'autoLockMin', 'retentionYears'].forEach((k) => { s[k] = +f[k].value; });
-      try { S.boot = await api('PUT', '/settings', { settings: s }); $('#store-name').textContent = S.boot.settings.storeName || '予約台帳'; toast('保存しました'); renderSettings().catch(fail); } catch (err) { fail(err); }
+    sform.addEventListener('submit', (e) => {
+      e.preventDefault(); const f = sform.elements, s = {};
+      ['storeName', 'open', 'close', 'lunchEnd'].forEach((k) => { s[k] = f[k].value; }); ['defaultStayMin', 'autoLockMin', 'retentionYears'].forEach((k) => { s[k] = +f[k].value; });
+      save({ settings: s });
     });
 
-    // テーブル
     const tRows = h('tbody');
     const addTRow = (t) => tRows.append(h('tr', { 'data-id': t.id || '' },
       h('td', null, h('input', { value: t.name, 'data-k': 'name', 'aria-label': 'テーブルの名前' })),
       h('td', { class: 'small' }, h('input', { value: t.min || 1, type: 'number', min: 1, max: 200, 'data-k': 'min', 'aria-label': '最小人数' })),
       h('td', { class: 'small' }, h('input', { value: t.cap, type: 'number', min: 1, max: 200, 'data-k': 'cap', 'aria-label': '最大人数' })),
-      h('td', null, h('input', { value: t.area, 'data-k': 'area', 'aria-label': 'エリア' })), h('td', { class: 'small' }, h('input', { value: t.pos, 'data-k': 'pos', 'aria-label': 'レジの席番号' })),
-      h('td', null, h('button', { type: 'button', text: '↑', title: '上へ', onclick: (e) => { const tr = e.target.closest('tr'); if (tr.previousElementSibling) tr.parentNode.insertBefore(tr, tr.previousElementSibling); } }),
-        h('button', { type: 'button', text: '外す', onclick: (e) => e.target.closest('tr').remove() }))));
+      h('td', null, h('input', { value: t.area, 'data-k': 'area', 'aria-label': 'エリア' })),
+      h('td', null, (() => { const s = h('select', { 'data-k': 'smoke', 'aria-label': '喫煙' }, ['禁煙', '喫煙', ''].map((x) => h('option', { value: x, text: x || '—' }))); s.value = t.smoke || ''; return s; })()),
+      h('td', { class: 'small' }, h('input', { value: t.pos, 'data-k': 'pos', 'aria-label': 'レジの席番号' })),
+      h('td', null, h('button', { type: 'button', text: '↑', onclick: (e) => { const tr = e.target.closest('tr'); if (tr.previousElementSibling) tr.parentNode.insertBefore(tr, tr.previousElementSibling); } }), h('button', { type: 'button', text: '外す', onclick: (e) => e.target.closest('tr').remove() }))));
     S.boot.tables.forEach(addTRow);
-    const tPanel = h('div', { class: 'panel' }, h('h3', { text: 'テーブル（タイムテーブルの上から順に並びます）' }),
-      h('p', { class: 'hint', text: '定員は「最小〜最大」の人数です。新規予約では、人数がこの範囲に入る空きテーブルのうち、いちばん小さいものを自動で選びます。「レジの席番号」は、あとでレジのデータとつなぐ時に使います。外したテーブルに入っていた予約はウェイティングリストに移ります。' }),
-      h('div', { class: 'table-wrap' }, h('table', { class: 'tbl edit-table' }, h('thead', null, h('tr', null, ['名前', '最小', '最大', 'エリア', 'レジの席番号', ''].map((x) => h('th', { text: x })))), tRows)),
-      h('div', { class: 'actions' }, h('button', { type: 'button', text: '＋ テーブルを足す', onclick: () => addTRow({ name: '', min: 1, cap: 4, area: '', pos: '' }) }), h('span', { class: 'sep' }),
-        h('button', { class: 'primary', type: 'button', text: 'テーブルを保存', onclick: async () => {
-          const tables = $$('tr', tRows).map((tr) => ({ id: tr.dataset.id, name: $('[data-k=name]', tr).value, min: +$('[data-k=min]', tr).value, cap: +$('[data-k=cap]', tr).value, area: $('[data-k=area]', tr).value, pos: $('[data-k=pos]', tr).value }));
-          try { S.boot = await api('PUT', '/settings', { tables }); toast('テーブルを保存しました'); renderSettings().catch(fail); } catch (err) { fail(err); }
-        } })));
+    const tPanel = h('div', { class: 'panel-box' }, h('h3', { text: 'テーブル（予約台帳の上から順に並びます）' }),
+      h('p', { class: 'hint', text: '定員は「最小-最大」の人数です。人数が最小より少ないと「席過剰」、最大より多いと「席不足」の印が付きます。「レジの席番号」は、レジのデータとつなぐ時に使います。外したテーブルの予約はウェイティングに移ります。' }),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'tbl edit-table' }, h('thead', null, h('tr', null, ['名前', '最小', '最大', 'エリア', '喫煙', 'レジの席番号', ''].map((x) => h('th', { text: x })))), tRows)),
+      h('div', { class: 'actions' }, h('button', { type: 'button', text: '＋ テーブルを足す', onclick: () => addTRow({ name: '', min: 1, cap: 4, area: '', pos: '', smoke: '禁煙' }) }), h('span', { class: 'sep' }),
+        h('button', { class: 'primary', type: 'button', text: 'テーブルを保存', onclick: () => save({ tables: $$('tr', tRows).map((tr) => ({ id: tr.dataset.id, name: $('[data-k=name]', tr).value, min: +$('[data-k=min]', tr).value, cap: +$('[data-k=cap]', tr).value, area: $('[data-k=area]', tr).value, smoke: $('[data-k=smoke]', tr).value, pos: $('[data-k=pos]', tr).value })) }, 'テーブルを保存しました') })));
 
-    // コース
     const kRows = h('tbody');
     const addKRow = (c) => kRows.append(h('tr', { 'data-id': c.id || '' },
       h('td', null, h('input', { value: c.name, 'data-k': 'name', 'aria-label': 'コース名' })), h('td', { class: 'small' }, h('input', { value: c.price, type: 'number', min: 0, 'data-k': 'price', 'aria-label': '金額' })),
       h('td', null, h('button', { type: 'button', text: '外す', onclick: (e) => e.target.closest('tr').remove() }))));
     S.boot.courses.forEach(addKRow);
-    const kPanel = h('div', { class: 'panel' }, h('h3', { text: 'コース' }),
-      h('div', { class: 'table-wrap' }, h('table', { class: 'tbl edit-table' }, h('thead', null, h('tr', null, ['コース名（レジの商品名と同じにすると、あとでつなぎやすい）', '金額（税込・1人）', ''].map((x) => h('th', { text: x })))), kRows)),
+    const kPanel = h('div', { class: 'panel-box' }, h('h3', { text: 'コース' }),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'tbl edit-table' }, h('thead', null, h('tr', null, ['コース名（レジの商品名と同じにすると、あとでつなぎやすい）', '金額（1人）', ''].map((x) => h('th', { text: x })))), kRows)),
       h('div', { class: 'actions' }, h('button', { type: 'button', text: '＋ コースを足す', onclick: () => addKRow({ name: '', price: 0 }) }), h('span', { class: 'sep' }),
-        h('button', { class: 'primary', type: 'button', text: 'コースを保存', onclick: async () => {
-          const courses = $$('tr', kRows).map((tr) => ({ id: tr.dataset.id, name: $('[data-k=name]', tr).value, price: +$('[data-k=price]', tr).value || 0 }));
-          try { S.boot = await api('PUT', '/settings', { courses }); fillSelects(); toast('コースを保存しました'); renderSettings().catch(fail); } catch (err) { fail(err); }
-        } })));
+        h('button', { class: 'primary', type: 'button', text: 'コースを保存', onclick: () => save({ courses: $$('tr', kRows).map((tr) => ({ id: tr.dataset.id, name: $('[data-k=name]', tr).value, price: +$('[data-k=price]', tr).value || 0 })) }, 'コースを保存しました') })));
 
-    // 合言葉
-    const pform = h('form', { class: 'panel', autocomplete: 'off' }, h('h3', { text: '合言葉を変える' }),
-      h('div', { class: 'row' }, lab('今の合言葉', inp('oldPass', '', 'password')), lab('新しい合言葉（8文字以上）', inp('newPass', '', 'password')), lab('もう一度', inp('newPass2', '', 'password'))),
+    const listBox = (title, key, hint, cur) => {
+      const ta = h('textarea', { rows: 6, value: cur.join('\n') });
+      return h('div', { class: 'panel-box' }, h('h3', { text: title }), h('p', { class: 'hint', text: hint + '（1行に1つ）' }), ta,
+        h('div', { class: 'actions' }, h('span', { class: 'sep' }), h('button', { class: 'primary', type: 'button', text: '保存', onclick: () => save({ [key]: ta.value.split('\n').map((x) => x.trim()).filter(Boolean) }) })));
+    };
+    const fLabel = h('input', { value: S.boot.free.label }), fOpts = h('textarea', { rows: 4, value: S.boot.free.options.join('\n') });
+    const freeBox = h('div', { class: 'panel-box' }, h('h3', { text: '自由設定欄' }), h('p', { class: 'hint', text: '予約ごとに選べる項目を、お店で自由に決められます（例：「来店のきっかけ」→ 紹介／チラシ／Instagram）。選択肢を空にすると、予約の入力欄に出ません。' }),
+      h('div', { class: 'row' }, h('label', null, '項目の名前', fLabel), h('label', null, '選択肢（1行に1つ）', fOpts)),
+      h('div', { class: 'actions' }, h('span', { class: 'sep' }), h('button', { class: 'primary', type: 'button', text: '保存', onclick: () => save({ free: { label: fLabel.value, options: fOpts.value.split('\n').map((x) => x.trim()).filter(Boolean) } }) })));
+    box.append(sform, tPanel, kPanel,
+      listBox('担当者', 'staff', '予約を確定する時に選ぶスタッフの名前', S.boot.staff),
+      listBox('予約タグ', 'resTags', '予約に付ける印（例：ケーキ用意、お誕生日）', S.boot.resTags),
+      listBox('お客様属性', 'custAttrs', 'お客様に付ける印（例：VIP、要注意、常連さま）', S.boot.custAttrs), freeBox);
+  }
+
+  async function renderSecurity() {
+    const box = $('#sec-body'); box.replaceChildren();
+    const inp = (name, type) => h('input', { name, type: type || 'password', autocomplete: 'off' });
+    const lab = (t, el) => h('label', null, t, el);
+    const pform = h('form', { class: 'panel-box', autocomplete: 'off' }, h('h3', { text: '合言葉を変える' }),
+      h('div', { class: 'row' }, lab('今の合言葉', inp('oldPass')), lab('新しい合言葉（8文字以上）', inp('newPass')), lab('もう一度', inp('newPass2'))),
       h('div', { class: 'actions' }, h('span', { class: 'sep' }), h('button', { class: 'primary', text: '変える' })));
     pform.addEventListener('submit', async (e) => {
       e.preventDefault(); const f = pform.elements;
       try {
         if (f.newPass.value !== f.newPass2.value) throw new Error('確認用の合言葉が一致しません');
-        touch();
-        L._log('合言葉を変更');
-        await saving.catch(() => {});
+        touch(); L._log('合言葉を変更'); await saving.catch(() => {});
         await vault.changePass(f.oldPass.value, f.newPass.value, L.db);
         pform.reset(); toast('合言葉を変えました。新しい合言葉を紙に控え、バックアップも書き出し直してください');
       } catch (err) { fail(err); }
     });
-
-    // バックアップと記録
     const lg = await api('GET', '/log');
     const snaps = await vault.snapshots();
     const last = L.db.lastBackupAt;
     const doExport = async (snap) => {
       try {
         const text = await vault.exportText(snap);
-        const name = '予約台帳_' + (snap || C.localDate()) + '.yoyaku';
-        const r = await shareOrDownload(name, new Blob([text], { type: 'application/octet-stream' }));
+        const r = await shareOrDownload('予約台帳_' + (snap || C.localDate()) + '.yoyaku', new Blob([text], { type: 'application/octet-stream' }));
         if (r === 'aborted') return;
         if (!snap) { L.db.lastBackupAt = new Date().toISOString(); L._log('バックアップを書き出し'); await persist(); }
         toast('書き出しました。iPadの外（Macや外付け）にも置いてください');
-        renderSettings().catch(fail);
+        renderSecurity().catch(fail);
       } catch (err) { fail(err); }
     };
     const snapSel = h('select', { 'aria-label': '控えの日付' }, snaps.map((d) => h('option', { value: d, text: d })));
     const fileIn = h('input', { type: 'file', accept: '.yoyaku,application/octet-stream,application/json,text/plain' });
     const passIn = h('input', { type: 'password', placeholder: 'そのバックアップを作った時の合言葉', autocomplete: 'off' });
-    const bPanel = h('div', { class: 'panel' }, h('h3', { text: '保存場所とバックアップ' }),
+    const bPanel = h('div', { class: 'panel-box' }, h('h3', { text: '保存場所とバックアップ' }),
       h('dl', { class: 'kvs' },
         h('dt', { text: '保存場所' }), h('dd', { text: 'このiPad（このブラウザ）の中。暗号化して保存しています。' }),
         h('dt', { text: '勝手に消されない設定' }), h('dd', { text: S.persisted ? 'オン' : 'オフ（ホーム画面に追加したアイコンから開くと、オンになりやすくなります）' }),
@@ -1077,8 +1314,7 @@
         h('dt', { text: '毎日の控え' }), h('dd', { text: snaps.length ? snaps.length + '日分（14日分を残します）' : 'まだありません（明日以降の最初の保存で作られます）' })),
       h('p', { class: 'hint', text: 'iPadが壊れた・なくした・ブラウザのデータを消した時に備えて、週に1回はバックアップを書き出し、「ファイル」アプリやAirDropでiPadの外に置いてください。ファイルは暗号化されたままで、合言葉がなければ読めません。' }),
       h('div', { class: 'actions' }, h('button', { class: 'primary', type: 'button', text: 'バックアップを書き出す', onclick: () => doExport(null) }),
-        snaps.length ? h('span', { class: 'muted', text: '／ 控えから：' }) : null, snaps.length ? snapSel : null,
-        snaps.length ? h('button', { type: 'button', text: 'この日の控えを書き出す', onclick: () => doExport(snapSel.value) }) : null),
+        snaps.length ? snapSel : null, snaps.length ? h('button', { type: 'button', text: 'この日の控えを書き出す', onclick: () => doExport(snapSel.value) }) : null),
       h('details', { style: 'margin-top:10px' }, h('summary', { text: 'バックアップから戻す' }),
         h('p', { class: 'hint', text: '今の台帳は、その日の控えに残してから置き換えます。戻したあとは、そのバックアップを作った時の合言葉で開きます。' }),
         h('div', { class: 'row' }, fileIn, passIn),
@@ -1086,16 +1322,15 @@
           try {
             const f = fileIn.files && fileIn.files[0];
             if (!f) throw new Error('バックアップのファイルを選んでください');
-            if (!confirm('今の台帳を「' + f.name + '」の中身で置き換えます。\n今の台帳は今日の控えに残ります。\n戻しますか？')) return;
+            if (!(await ask('バックアップから戻します', '今の台帳を「' + f.name + '」の中身で置き換えます。\n今の台帳は今日の控えに残ります。', { ok: '戻す' }))) return;
             const db = await vault.importText(await f.text(), passIn.value);
             L = new C.Ledger(db); L._log('バックアップから戻す'); await persist();
             toast('戻しました'); await enter();
           } catch (err) { fail(err); }
         } }))));
-    const lPanel = h('details', { class: 'panel' }, h('summary', { text: '操作の記録（だれが何をしたかの目安。お客様の名前は記録しません）' }),
+    const lPanel = h('details', { class: 'panel-box' }, h('summary', { text: '操作の記録（だれが何をしたかの目安。お客様の名前は記録しません）' }),
       h('div', { class: 'table-wrap', style: 'max-height:300px;margin-top:8px' }, h('table', { class: 'tbl' }, h('tbody', null, lg.log.map((x) => h('tr', null, h('td', { text: new Date(x.t).toLocaleString('ja-JP') }), h('td', { text: x.act }), h('td', { text: x.ref })))))));
-
-    box.append(sform, tPanel, kPanel, pform, bPanel, lPanel);
+    box.append(pform, bPanel, lPanel, h('div', { class: 'panel-box' }, h('h3', { text: 'ロック' }), h('p', { class: 'hint', text: '席を離れる時は、ロックしてください。開くには合言葉が要ります。' }), h('button', { class: 'primary', text: 'ロックする', onclick: () => lockNow('ロック') })));
   }
 
   start().catch((e) => { document.body.textContent = '予約台帳を開けませんでした。（' + e.message + '）'; });
