@@ -637,6 +637,24 @@
     return panelForm(body, foot);
   }
 
+  // キーボードの「次へ」で次の欄へ移る（キーボードを閉じずに続けて入力できる）
+  function nextOnEnter(box) {
+    const fields = () => $$('input:not([type=checkbox]):not([type=hidden]), textarea', box).filter((x) => !x.disabled && x.offsetParent !== null);
+    for (const el of $$('input', box)) {
+      if (el.type === 'checkbox') continue;
+      el.setAttribute('enterkeyhint', 'next');
+      if (el.type === 'text') { el.setAttribute('lang', 'ja'); el.setAttribute('autocapitalize', 'off'); }
+    }
+    if (box.dataset.nextOnEnter) return; // 何度作り直しても、押した時の動きは1つだけ
+    box.dataset.nextOnEnter = '1';
+    box.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229 || e.target.tagName !== 'INPUT' || e.target.type === 'checkbox') return;
+      const list = fields(), i = list.indexOf(e.target);
+      if (i < 0) return;
+      e.preventDefault();
+      if (list[i + 1]) list[i + 1].focus(); else e.target.blur();
+    });
+  }
   function fld(label, ...kids) { return h('div', { class: 'fld' }, label ? h('span', { class: 'fl', text: label }) : null, ...kids); }
   function panelForm(body, foot) {
     const f = P.f;
@@ -648,8 +666,26 @@
     const tl = h('input', { type: 'checkbox', checked: f.timeLimit, onchange: (e) => { f.timeLimit = e.target.checked; } });
     const reset = sel('resetMin', [0, 15, 30, 45, 60].map((m) => [m, m + '分']), reTime);
     reset.value = String(f.resetMin);
-    const num = (k, ph) => { const el = bind(k, h('input', { type: 'number', min: 0, max: 300, inputmode: 'numeric', placeholder: ph || '' }), true); el.addEventListener('change', () => { if (k === 'adults' && (f.adultsMin === '' || f.adultsMin > f.adults)) f.adultsMin = f.adults; if (k === 'kids' && (f.kidsMin === '' || f.kidsMin > f.kids)) f.kidsMin = f.kids; renderTime(); renderPanel(); }); return el; };
-    const n = (+f.adults || 0) + (+f.kids || 0);
+    // 人数を変えた時は、入力欄全体を作り直さない（作り直すと、次に押した欄のキーボードが閉じてしまう）
+    const numEls = {};
+    const num = (k, ph) => {
+      const el = numEls[k] = bind(k, h('input', { type: 'number', min: 0, max: 300, inputmode: 'numeric', enterkeyhint: 'next', placeholder: ph || '' }), true);
+      el.addEventListener('change', () => {
+        if (k === 'adults' && (f.adultsMin === '' || f.adultsMin > f.adults)) { f.adultsMin = f.adults; numEls.adultsMin.value = f.adultsMin; }
+        if (k === 'kids' && (f.kidsMin === '' || f.kidsMin > f.kids)) { f.kidsMin = f.kids; numEls.kidsMin.value = f.kidsMin; }
+        renderTime(); drawTables();
+      });
+      return el;
+    };
+    const tblSec = h('div');
+    const drawTables = () => {
+      const n = (+f.adults || 0) + (+f.kids || 0);
+      tblSec.replaceChildren(fld('テーブル', f.tableIds.length ? h('div', { text: (f.tableIds.map((id) => { const t = S.boot.tables.find((x) => x.id === id); return t ? smokeIcon(t) + ' ' + t.name : ''; }).join(', ')) })
+        : h('div', { class: 'red', text: '席を選択してください（左の表で、テーブルの枠を押します）' }),
+        wide() ? null : tablePicker(),
+        h('button', { class: 'addlink', text: '空いているテーブルを自動で選ぶ', onclick: autoPick }), n ? null : h('div', { class: 'red', text: '人数を入れると、定員に合うテーブルが分かります' })));
+    };
+    drawTables();
     body.append(h('div', { class: 'pn-sec', text: P.r ? '予約の変更' : '基本情報' }),
       fld('時間', h('div', { class: 'pair' }, startSel, h('span', { text: '-' }), endSel), h('label', { class: 'chk' }, tl, '時間制限あり')),
       fld('リセットタイム', reset),
@@ -657,10 +693,7 @@
       fld('大人', h('div', { class: 'pair' }, num('adultsMin', '最小'), h('span', { text: '-' }), num('adults', '最大'))),
       fld('お子様', h('div', { class: 'pair' }, num('kidsMin'), h('span', { text: '-' }), num('kids')), h('span', { class: 'hint', text: '(お席が必要なお子様)' })),
       h('hr', { class: 'thin' }),
-      fld('テーブル', f.tableIds.length ? h('div', { text: (f.tableIds.map((id) => { const t = S.boot.tables.find((x) => x.id === id); return t ? smokeIcon(t) + ' ' + t.name : ''; }).join(', ')) })
-        : h('div', { class: 'red', text: '席を選択してください（左の表で、テーブルの枠を押します）' }),
-        wide() ? null : tablePicker(),
-        h('button', { class: 'addlink', text: '空いているテーブルを自動で選ぶ', onclick: autoPick }), n ? null : h('div', { class: 'red', text: '人数を入れると、定員に合うテーブルが分かります' })));
+      tblSec);
     // 携帯番号・お名前
     const ph1 = bind('phone', h('input', { type: 'tel', inputmode: 'tel', placeholder: '携帯番号1 (ウォークインは0000)' }));
     ph1.addEventListener('input', () => { if (String(f.phone).replace(/\D/g, '').length >= 4 && !f.customer) findCust(f.phone); });
@@ -690,6 +723,7 @@
       fld('予約タグ', tagBox),
       S.boot.free.options.length ? fld(S.boot.free.label, sel('free', [['', ''], ...S.boot.free.options.map((o) => [o, o])])) : null,
       fld('予約経路', sel('source', [['', ''], ...S.boot.sources.map((s) => [s, s])])));
+    nextOnEnter(body);
     // 下のボタン
     foot.append(h('div', { class: 'err', id: 'pn-err' }), h('div', { class: 'row2' }, h('button', { class: 'primary-line', text: '予約内容を確認', onclick: toConfirm })));
   }
@@ -909,6 +943,7 @@
         h('button', { type: 'button', text: '戻る', onclick: () => { S.cEdit = null; if (S.cTab === 'new') S.cTab = 'list'; renderCustomers().catch(fail); } }),
         c ? h('button', { type: 'button', text: 'この方の予約を入れる', onclick: () => { openForm(null, { date: S.today }); Object.assign(P.f, { customer: c, phone: c.phone, phone2: c.phone2, lastName: c.lastName, firstName: c.firstName, lastKana: c.lastKana, firstKana: c.firstKana, company: c.company }); renderPanel(); } }) : null,
         h('button', { class: 'blue', text: c ? '保存' : '登録' })));
+    nextOnEnter(form);
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       const fd = new FormData(form), body = { tags: attrs, hidden: fd.get('hidden') === 'on' };
