@@ -1259,19 +1259,35 @@
       h('div', { class: 'actions' }, h('button', { type: 'button', text: '＋ コースを足す', onclick: () => addKRow({ name: '', price: 0 }) }), h('span', { class: 'sep' }),
         h('button', { class: 'primary', type: 'button', text: 'コースを保存', onclick: () => save({ courses: $$('tr', kRows).map((tr) => ({ id: tr.dataset.id, name: $('[data-k=name]', tr).value, price: +$('[data-k=price]', tr).value || 0 })) }, 'コースを保存しました') })));
 
-    const listBox = (title, key, hint, cur) => {
-      const ta = h('textarea', { rows: 6, value: cur.join('\n') });
-      return h('div', { class: 'panel-box' }, h('h3', { text: title }), h('p', { class: 'hint', text: hint + '（1行に1つ）' }), ta,
-        h('div', { class: 'actions' }, h('span', { class: 'sep' }), h('button', { class: 'primary', type: 'button', text: '保存', onclick: () => save({ [key]: ta.value.split('\n').map((x) => x.trim()).filter(Boolean) }) })));
+    // 担当者・予約タグ・お客様属性：テーブルやコースと同じく、1行ずつ足して・外して・並べ替える
+    const listBox = (title, key, hint, cur, maxLen) => {
+      const rows = h('tbody');
+      const addRow = (val, focus) => {
+        const input = h('input', { value: val, maxlength: maxLen, 'data-k': 'name', 'aria-label': title + 'の名前' });
+        rows.append(h('tr', null, h('td', null, input),
+          h('td', { class: 'btns' }, h('button', { type: 'button', text: '↑', 'aria-label': '上へ', onclick: (e) => { const tr = e.target.closest('tr'); if (tr.previousElementSibling) tr.parentNode.insertBefore(tr, tr.previousElementSibling); } }),
+            h('button', { type: 'button', text: '外す', onclick: (e) => e.target.closest('tr').remove() }))));
+        if (focus) input.focus();
+      };
+      cur.forEach((x) => addRow(x));
+      const collect = () => $$('[data-k=name]', rows).map((x) => x.value.trim()).filter(Boolean);
+      return h('div', { class: 'panel-box' }, h('h3', { text: title }), h('p', { class: 'hint', text: hint + '。上から順に選択肢として並びます。' }),
+        h('div', { class: 'table-wrap' }, h('table', { class: 'tbl edit-table' }, h('thead', null, h('tr', null, h('th', { text: '名前' }), h('th'))), rows)),
+        h('div', { class: 'actions' }, h('button', { type: 'button', text: '＋ ' + title + 'を足す', onclick: () => addRow('', true) }), h('span', { class: 'sep' }),
+          h('button', { class: 'primary', type: 'button', text: title + 'を保存', onclick: () => {
+            const list = collect(), dup = list.filter((x, i) => list.indexOf(x) !== i);
+            if (dup.length) { toast('「' + dup[0] + '」が2つあります。どちらかを外してください', true); return; }
+            save({ [key]: list }, title + 'を保存しました');
+          } })));
     };
     const fLabel = h('input', { value: S.boot.free.label }), fOpts = h('textarea', { rows: 4, value: S.boot.free.options.join('\n') });
     const freeBox = h('div', { class: 'panel-box' }, h('h3', { text: '自由設定欄' }), h('p', { class: 'hint', text: '予約ごとに選べる項目を、お店で自由に決められます（例：「来店のきっかけ」→ 紹介／チラシ／Instagram）。選択肢を空にすると、予約の入力欄に出ません。' }),
       h('div', { class: 'row' }, h('label', null, '項目の名前', fLabel), h('label', null, '選択肢（1行に1つ）', fOpts)),
       h('div', { class: 'actions' }, h('span', { class: 'sep' }), h('button', { class: 'primary', type: 'button', text: '保存', onclick: () => save({ free: { label: fLabel.value, options: fOpts.value.split('\n').map((x) => x.trim()).filter(Boolean) } }) })));
     box.append(sform, tPanel, kPanel,
-      listBox('担当者', 'staff', '予約を確定する時に選ぶスタッフの名前', S.boot.staff),
-      listBox('予約タグ', 'resTags', '予約に付ける印（例：ケーキ用意、お誕生日）', S.boot.resTags),
-      listBox('お客様属性', 'custAttrs', 'お客様に付ける印（例：VIP、要注意、常連さま）', S.boot.custAttrs), freeBox);
+      listBox('担当者', 'staff', '予約を確定する時に選ぶスタッフの名前', S.boot.staff, 30),
+      listBox('予約タグ', 'resTags', '予約に付ける印（例：ケーキ用意、お誕生日）', S.boot.resTags, 20),
+      listBox('お客様属性', 'custAttrs', 'お客様に付ける印（例：VIP、要注意、常連さま）', S.boot.custAttrs, 20), freeBox);
   }
 
   async function renderSecurity() {

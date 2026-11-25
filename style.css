@@ -251,6 +251,7 @@ hr.thin { border: none; border-top: 1px solid var(--line); margin: 12px 0; }
 .row > * { min-width: 0; }
 .edit-table td input, .edit-table td select { width: 100%; }
 .edit-table td.small input { width: 64px; }
+.edit-table td.btns { width: 1%; white-space: nowrap; }
 .actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
 .kvs { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; margin: 10px 0; font-size: 13px; }
 .kvs dt { color: var(--muted); } .kvs dd { margin: 0; overflow-wrap: anywhere; }
