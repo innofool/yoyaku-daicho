@@ -1,6 +1,6 @@
 {
-  "name": "おもてなし予約",
-  "short_name": "おもてなし予約",
+  "name": "OMOTENASI",
+  "short_name": "OMOTENASI",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
