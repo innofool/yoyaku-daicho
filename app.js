@@ -408,7 +408,7 @@
       h('h1', { text: 'OMOTENASI予約　緊急キット（' + title + '）' }), h('p', { class: 'kit-date', text: '作った日 ' + day }),
       h('table', null, h('tbody', null, rows.map(([k, v]) => h('tr', null, h('th', { text: k }), h('td', { class: v ? 'kit-val' : 'kit-blank', text: v || '' }))))),
       h('ul', null, notes.map((t) => h('li', { text: t }))));
-    const url = location.origin + location.pathname;
+    const url = window.YOYAKU_HOME || (location.origin + location.pathname);
     if (codes[1]) area.append(sheet('お店で保管', [['開くアドレス', url], ['ID（メールアドレス）', email], ['復旧コード 1', codes[1]], ['保管した場所', '']], [
       'パスワードを忘れても、この紙と、登録したメールに届く確認コードで台帳を開けます（「パスワードを忘れた」から）。',
       'パスワードはこの紙に書かず、別の場所に保管してください。',

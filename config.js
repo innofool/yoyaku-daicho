@@ -8,4 +8,7 @@
   var DEV = 'http://127.0.0.1:8787'; // 手元の試験用（node server/dev.mjs）
   var local = location.hostname === '127.0.0.1' || location.hostname === 'localhost';
   window.YOYAKU_API = local ? DEV : PRODUCTION;
+  // 正式に案内するアドレス（緊急キットに印刷する）。前のアドレス（innofool.github.io）からも当面は開ける
+  var HOME = 'https://omotenasi-yoyaku.pages.dev/';
+  window.YOYAKU_HOME = local ? location.origin + location.pathname : HOME;
 })();
