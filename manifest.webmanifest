@@ -1,6 +1,6 @@
 {
-  "name": "予約台帳",
-  "short_name": "予約台帳",
+  "name": "おもてなし予約",
+  "short_name": "おもてなし予約",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

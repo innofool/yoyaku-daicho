@@ -1,5 +1,5 @@
 'use strict';
-// 予約台帳の画面。データはこの端末の中だけで扱い、外へは送らない。
+// おもてなし予約（予約台帳）の画面。データはこの端末の中だけで扱い、外へは送らない。
 // お客様の文字は必ず textContent で表示する（画面に仕込まれた文字が命令として動かないように）。
 // 画面の並びと操作は、飲食店でよく使われる予約台帳の管理画面（本人が見せてくれた画面写真）に合わせている。
 (function () {
@@ -112,7 +112,7 @@
   // ほかの端末の変更を受け取った時：入力中なら邪魔をせず、お知らせだけ出す
   async function refreshAfterRemote() {
     S.boot = await api('GET', '/bootstrap');
-    $('#store-name').textContent = S.boot.settings.storeName || '予約台帳';
+    $('#store-name').textContent = S.boot.settings.storeName || 'おもてなし予約';
     const ae = document.activeElement;
     const busy = P || $$('dialog[open]').length || ['settings', 'security', 'search', 'print', 'csv', 'widget'].includes(S.view) || (S.view === 'customers' && S.cTab !== 'list') || (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName));
     if (busy) { toast('ほかの端末の変更を受け取りました', false, { label: '画面を更新', fn: () => show(S.view) }); return; }
@@ -405,7 +405,7 @@
     const area = $('#print-area'); area.replaceChildren();
     const day = new Date().toLocaleDateString('ja-JP');
     const sheet = (title, rows, notes) => h('div', { class: 'pg kit' },
-      h('h1', { text: '予約台帳　緊急キット（' + title + '）' }), h('p', { class: 'kit-date', text: '作った日 ' + day }),
+      h('h1', { text: 'おもてなし予約　緊急キット（' + title + '）' }), h('p', { class: 'kit-date', text: '作った日 ' + day }),
       h('table', null, h('tbody', null, rows.map(([k, v]) => h('tr', null, h('th', { text: k }), h('td', { class: v ? 'kit-val' : 'kit-blank', text: v || '' }))))),
       h('ul', null, notes.map((t) => h('li', { text: t }))));
     const url = location.origin + location.pathname;
@@ -467,7 +467,7 @@
   async function enter() {
     S.boot = await api('GET', '/bootstrap');
     $('#gate').hidden = true; $('#app').hidden = false;
-    $('#store-name').textContent = S.boot.settings.storeName || '予約台帳';
+    $('#store-name').textContent = S.boot.settings.storeName || 'おもてなし予約';
     if (!S.date) S.date = S.today;
     if (!S.homeYm) S.homeYm = S.today.slice(0, 7);
     show(S.view);
@@ -1421,7 +1421,7 @@
     const list = r.reservations.filter((x) => ACTIVE.has(x.status) && toMin(x.time) >= fromH * 60 && toMin(x.time) < toH * 60);
     const area = $('#print-area'); area.replaceChildren();
     const nm = (c) => (c ? (opt['ご予約者様名の表示は漢字を優先'] ? c.name || c.kana : c.kana || c.name) || c.phone : 'お名前なし');
-    const head = h('div', null, h('h1', { text: (S.boot.settings.storeName || '予約台帳') + '　' + jpDate(date) + '　' + fromH + '時〜' + toH + '時（' + list.length + '組 ' + list.reduce((a, x) => a + x.guests, 0) + '名）' }),
+    const head = h('div', null, h('h1', { text: (S.boot.settings.storeName || 'おもてなし予約') + '　' + jpDate(date) + '　' + fromH + '時〜' + toH + '時（' + list.length + '組 ' + list.reduce((a, x) => a + x.guests, 0) + '名）' }),
       opt['本日の情報'] && r.info ? h('p', { text: '本日の情報：' + r.info }) : null);
     const sheet = h('div', { class: 'pg' }, head);
     if (S.pTab === 'list') {
@@ -1515,7 +1515,7 @@
     const st = S.boot.settings, box = $('#set-body'); box.replaceChildren();
     const inp = (name, val, type, extra) => h('input', { name, value: val, type: type || 'text', ...(extra || {}) });
     const lab = (t, el) => h('label', null, t, el);
-    const save = async (body, msg) => { try { S.boot = await api('PUT', '/settings', body); $('#store-name').textContent = S.boot.settings.storeName || '予約台帳'; toast(msg || '保存しました'); renderSettings().catch(fail); } catch (err) { fail(err); } };
+    const save = async (body, msg) => { try { S.boot = await api('PUT', '/settings', body); $('#store-name').textContent = S.boot.settings.storeName || 'おもてなし予約'; toast(msg || '保存しました'); renderSettings().catch(fail); } catch (err) { fail(err); } };
 
     const sform = h('form', { class: 'panel-box' }, h('h3', { text: 'お店' }),
       h('div', { class: 'row' }, lab('お店の名前（画面の左上に出ます）', inp('storeName', st.storeName)), lab('開店', inp('open', st.open, 'time')), lab('閉店', inp('close', st.close, 'time')), lab('昼と夜の境目', inp('lunchEnd', st.lunchEnd, 'time'))),
@@ -1648,7 +1648,7 @@
     const doExport = async (snap) => {
       try {
         const text = snap ? await acct.exportSnapshot(snap) : await acct.exportBackup(L.db);
-        const r = await shareOrDownload('予約台帳_' + (snap || C.localDate()) + '.yoyaku', new Blob([text], { type: 'application/octet-stream' }));
+        const r = await shareOrDownload('おもてなし予約_' + (snap || C.localDate()) + '.yoyaku', new Blob([text], { type: 'application/octet-stream' }));
         if (r === 'aborted') return;
         if (!snap) { L.db.lastBackupAt = new Date().toISOString(); L._log('バックアップを書き出し'); await persist(); }
         toast('書き出しました。iPadの外（Macや外付け）にも置いてください');
@@ -1716,7 +1716,7 @@
     const doExport = async (snap) => {
       try {
         const text = await vault.exportText(snap);
-        const r = await shareOrDownload('予約台帳_' + (snap || C.localDate()) + '.yoyaku', new Blob([text], { type: 'application/octet-stream' }));
+        const r = await shareOrDownload('おもてなし予約_' + (snap || C.localDate()) + '.yoyaku', new Blob([text], { type: 'application/octet-stream' }));
         if (r === 'aborted') return;
         if (!snap) { L.db.lastBackupAt = new Date().toISOString(); L._log('バックアップを書き出し'); await persist(); }
         toast('書き出しました。iPadの外（Macや外付け）にも置いてください');
@@ -1753,5 +1753,5 @@
     box.append(pform, bPanel, lPanel, h('div', { class: 'panel-box' }, h('h3', { text: 'ロック' }), h('p', { class: 'hint', text: '席を離れる時は、ロックしてください。開くには合言葉が要ります。' }), h('button', { class: 'primary', text: 'ロックする', onclick: () => lockNow('ロック') })));
   }
 
-  start().catch((e) => { document.body.textContent = '予約台帳を開けませんでした。（' + e.message + '）'; });
+  start().catch((e) => { document.body.textContent = 'おもてなし予約を開けませんでした。（' + e.message + '）'; });
 })();

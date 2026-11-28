@@ -7,20 +7,20 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://yoyaku-daicho-api.innofool.workers.dev http://127.0.0.1:8787; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="予約台帳">
+<meta name="apple-mobile-web-app-title" content="おもてなし予約">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="theme-color" content="#ffffff">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<title>予約台帳</title>
+<title>おもてなし予約</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <!-- 合言葉の画面 -->
 <section id="gate" class="gate" hidden>
   <div class="gate-card">
-    <h1>予約台帳</h1>
+    <h1>おもてなし予約</h1>
     <p class="gate-note" id="gate-note">お客様の情報はこの端末（iPad）の中に、暗号化して保存されます。インターネットには送りません。</p>
     <div id="gate-acct" class="gate-acct" hidden></div>
     <form id="gate-form" autocomplete="off">
@@ -38,7 +38,7 @@
 <div id="app" class="app" hidden>
   <header class="topbar">
     <button id="btn-side" class="icon-btn" aria-label="メニューを開く・閉じる">☰</button>
-    <span class="brand"><span class="logo-dot"></span><span id="store-name">予約台帳</span> ▾</span>
+    <span class="brand"><span class="logo-dot"></span><span id="store-name">おもてなし予約</span> ▾</span>
     <span id="sync-state" class="sync-state" hidden></span>
   </header>
   <div class="layout">
