@@ -13,7 +13,8 @@
 (function (root) {
   const ITER = 600000;
   const MIN_PASS = 8;
-  const KEEP_SNAPS = 14;
+  // 控えの残し方：毎日の控えを60日分、それより前は月ごとに1つ（その月の最初の日）を12か月分
+  const KEEP_DAILY = 60, KEEP_MONTHLY = 12;
   const KEEP_LOG = 3000;
   const SNAP_EVERY = 300;
   const te = new TextEncoder(), td = new TextDecoder();
@@ -24,6 +25,18 @@
   function bad(msg, status, code) { return Object.assign(new Error(msg), { status: status || 400, code: code || '' }); }
   function pad(n) { return String(n).padStart(2, '0'); }
   function today() { const d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
+  // 残す日付を選ぶ（days は 'YYYY-MM-DD' の並び）。受け口（worker.js）も同じ決まりで残す
+  function keepDays(days, now, daily, monthly) {
+    daily = daily || KEEP_DAILY; monthly = monthly || KEEP_MONTHLY;
+    const num = (s) => Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10)) / 86400000;
+    const t = num(now), mon = (s) => +s.slice(0, 4) * 12 + (+s.slice(5, 7) - 1), tm = mon(now);
+    const keep = new Set(), firstOfMonth = {};
+    for (const d of [...days].sort()) {
+      if (t - num(d) < daily) keep.add(d);
+      else if (tm - mon(d) < monthly && !firstOfMonth[d.slice(0, 7)]) { firstOfMonth[d.slice(0, 7)] = d; keep.add(d); }
+    }
+    return keep;
+  }
   function b64(u8) {
     let s = '';
     for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
@@ -381,8 +394,9 @@
         const k = 'snap:' + today();
         if (!(await this.s.get(k))) {
           await this.s.set(k, cur);
-          const snaps = (await this.s.keys()).filter((x) => /^snap:\d{4}-\d{2}-\d{2}$/.test(x)).sort();
-          for (const x of snaps.slice(0, Math.max(0, snaps.length - KEEP_SNAPS))) await this.s.del(x);
+          const snaps = (await this.s.keys()).filter((x) => /^snap:\d{4}-\d{2}-\d{2}$/.test(x)).map((x) => x.slice(5));
+          const keep = keepDays(snaps, today());
+          for (const d of snaps) if (!keep.has(d)) await this.s.del('snap:' + d);
         }
       }
       await this.s.set('ledger', { seq: this.lastSeq, savedAt: new Date().toISOString(), data: await seal(this.dk, db, this._aad('local')) });
@@ -436,10 +450,30 @@
         try { await this.uploadSnapshot(db); } catch (e) { /* 次の機会に */ }
       }
       await this.saveLocal(db);
+      // 4. 1日1回、台帳まるごとの控えを受け口に自動で預ける（暗号化したまま。受け口が日ごと・月ごとに残す）
+      if (r && !this.pending.length) { try { await this.autoBackup(db); } catch (e) { /* 次の機会に */ } }
       return { db, changed };
     }
     async uploadSnapshot(db) {
       await this.call('PUT', '/sync/snapshot?seq=' + this.lastSeq, await seal(this.dk, db, this._aad('snap')), { auth: true, raw: true, timeout: 120000 });
+    }
+
+    // ---------- 受け口の自動の控え ----------
+    async autoBackup(db, force) {
+      if (!force && (await this.s.get('bakDay')) === today()) return false;
+      await this.call('PUT', '/backup', await seal(this.dk, db, this._aad('bak')), { auth: true, raw: true, timeout: 120000 });
+      await this.s.set('bakDay', today());
+      return true;
+    }
+    async serverBackups() { return (await this.call('GET', '/backups', undefined, { auth: true, timeout: 20000 })).backups; }
+    async loadServerBackup(day) {
+      const s = await this.call('GET', '/backup?day=' + encodeURIComponent(day), undefined, { auth: true, text: true, timeout: 60000 });
+      return unseal(this.dk, s.text, this._aad('bak'));
+    }
+    async loadSnapshot(date) {
+      const x = await this.s.get('snap:' + date);
+      if (!x) throw bad('控えが見つかりません', 404);
+      return unseal(this.dk, x.data, this._aad('local'));
     }
 
     // ---------- バックアップ（ファイル） ----------
@@ -448,11 +482,7 @@
       const st = this.st;
       return JSON.stringify({ format: 'yoyaku-daicho-account', v: 1, kdf: { name: 'PBKDF2-SHA256', iter: st.iter, salt: st.salt }, wrappedPw: st.wrappedPw, savedAt: new Date().toISOString(), data: await seal(this.dk, db, 'yoyaku-backup') });
     }
-    async exportSnapshot(date) {
-      const x = await this.s.get('snap:' + date);
-      if (!x) throw bad('控えが見つかりません', 404);
-      return this.exportBackup(await unseal(this.dk, x.data, this._aad('local')));
-    }
+    async exportSnapshot(date) { return this.exportBackup(await this.loadSnapshot(date)); }
   }
   async function openBackup(text, password) {
     let j;
@@ -464,7 +494,7 @@
     return unseal(dk, j.data, 'yoyaku-backup');
   }
 
-  const api = { Account, openBackup, indexDb, diffDb, applyOps, newRecoveryCode, normRecovery, normEmail, MIN_PASS };
+  const api = { Account, openBackup, indexDb, diffDb, applyOps, newRecoveryCode, normRecovery, normEmail, keepDays, MIN_PASS, KEEP_DAILY, KEEP_MONTHLY };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.YoyakuAccount = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

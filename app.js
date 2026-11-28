@@ -1645,26 +1645,50 @@
 
     const snaps = await acct.snapshots();
     const last = L.db.lastBackupAt;
-    const doExport = async (snap) => {
+    // 控えの指定：'s:日付'＝受け口の自動の控え、'l:日付'＝この端末の控え
+    const loadPick = (v) => (v.startsWith('s:') ? acct.loadServerBackup(v.slice(2)) : acct.loadSnapshot(v.slice(2)));
+    const pickName = (v) => (v.startsWith('s:') ? '自動の控え（' : 'この端末の控え（') + v.slice(2) + '）';
+    const doExport = async (pick) => {
       try {
-        const text = snap ? await acct.exportSnapshot(snap) : await acct.exportBackup(L.db);
-        const r = await shareOrDownload('OMOTENASI予約_' + (snap || C.localDate()) + '.yoyaku', new Blob([text], { type: 'application/octet-stream' }));
+        const text = pick ? await acct.exportBackup(await loadPick(pick)) : await acct.exportBackup(L.db);
+        const r = await shareOrDownload('OMOTENASI予約_' + (pick ? pick.slice(2) : C.localDate()) + '.yoyaku', new Blob([text], { type: 'application/octet-stream' }));
         if (r === 'aborted') return;
-        if (!snap) { L.db.lastBackupAt = new Date().toISOString(); L._log('バックアップを書き出し'); await persist(); }
+        if (!pick) { L.db.lastBackupAt = new Date().toISOString(); L._log('バックアップを書き出し'); await persist(); }
         toast('書き出しました。iPadの外（Macや外付け）にも置いてください');
         renderSecurityAccount().catch(fail);
       } catch (err) { fail(err); }
     };
-    const snapSel = h('select', { 'aria-label': '控えの日付' }, snaps.map((d) => h('option', { value: d, text: d })));
+    const restorePick = run(async () => {
+      const v = pickSel.value;
+      if (!v) throw new Error('戻す控えを選んでください');
+      if (!(await ask('控えから戻します', '今の台帳を「' + pickName(v) + '」の中身で置き換えます。ほかの端末の台帳も置き換わります。\n今の台帳は、念のため今日の自動の控えとして預け直してから置き換えます。', { ok: '戻す' }))) return;
+      const db = await loadPick(v);
+      try { await acct.autoBackup(L.db, true); } catch (e) { /* つながっていない時は、この端末の今日の控えが残る */ }
+      L = new C.Ledger(db); L._log('控えから戻す', v.slice(2)); await persist();
+      toast('戻しました'); await enter();
+    });
+    const localGroup = h('optgroup', { label: 'この端末の控え' }, snaps.map((d) => h('option', { value: 'l:' + d, text: d })));
+    const serverGroup = h('optgroup', { label: '自動の控え（インターネット上）' });
+    const pickSel = h('select', { 'aria-label': '控えの日付' }, serverGroup, localGroup);
+    const autoInfo = h('dd', { text: '読み込み中…' });
+    acct.serverBackups().then((list) => {
+      serverGroup.replaceChildren(...list.map((x) => h('option', { value: 's:' + x.day, text: x.day })));
+      if (list.length) pickSel.value = 's:' + list[0].day;
+      autoInfo.textContent = list.length ? list.length + '日分（いちばん新しいのは ' + list[0].day + '）' : 'まだありません（インターネットにつながっている時に1日1回預けます）';
+    }).catch((e) => { serverGroup.remove(); autoInfo.textContent = e.code === 'offline' ? 'インターネットにつながっている時に表示します' : e.message; });
     const fileIn = h('input', { type: 'file', accept: '.yoyaku,application/octet-stream,application/json,text/plain' });
     const passIn = pw('そのバックアップを書き出した時のパスワード（前の形なら合言葉）');
     const bPanel = panel('バックアップ',
       h('dl', { class: 'kvs' },
-        h('dt', { text: '最後のバックアップ' }), h('dd', { text: last ? new Date(last).toLocaleString('ja-JP') : 'まだありません' }),
-        h('dt', { text: 'この端末の毎日の控え' }), h('dd', { text: snaps.length ? snaps.length + '日分（14日分を残します）' : 'まだありません' })),
-      h('p', { class: 'hint', text: '台帳は置き場所にも預けてありますが、念のため月に1回は書き出して、「ファイル」アプリやAirDropでiPadの外に置いてください。ファイルは暗号化されたままで、書き出した時のパスワードがなければ読めません。' }),
-      h('div', { class: 'actions' }, h('button', { class: 'primary', type: 'button', text: 'バックアップを書き出す', onclick: () => doExport(null) }),
-        snaps.length ? snapSel : null, snaps.length ? h('button', { type: 'button', text: 'この日の控えを書き出す', onclick: () => doExport(snapSel.value) }) : null),
+        h('dt', { text: '自動の控え（インターネット上）' }), autoInfo,
+        h('dt', { text: 'この端末の控え' }), h('dd', { text: snaps.length ? snaps.length + '日分' : 'まだありません' }),
+        h('dt', { text: '最後に書き出したファイル' }), h('dd', { text: last ? new Date(last).toLocaleString('ja-JP') : 'まだありません' })),
+      h('p', { class: 'hint', text: '台帳まるごとの控えを、1日1回自動で取っています（暗号化したまま。インターネット上とこの端末の両方）。毎日の控えを60日分、それより前は月ごとに1つを12か月分残します。まちがえて消した時などは、下の「控えから戻す」で戻せます。' }),
+      h('div', { class: 'actions' }, h('span', { class: 'muted', text: '控えから戻す・書き出す：' }), pickSel,
+        h('button', { type: 'button', text: 'この控えを書き出す', onclick: () => doExport(pickSel.value || null) }),
+        h('button', { type: 'button', class: 'danger', text: 'この控えに戻す', onclick: restorePick })),
+      h('p', { class: 'hint', text: '念のため、月に1回は「バックアップを書き出す」でファイルにして、「ファイル」アプリやAirDropでiPadの外（Macなど）にも置いてください。ファイルは暗号化されたままで、書き出した時のパスワードがなければ読めません。' }),
+      h('div', { class: 'actions' }, h('button', { class: 'primary', type: 'button', text: 'バックアップを書き出す', onclick: () => doExport(null) })),
       h('details', { style: 'margin-top:10px' }, h('summary', { text: 'バックアップから戻す' }),
         h('p', { class: 'hint', text: '今の台帳を、バックアップの中身で置き換えます。置き換えた内容は、ほかの端末にも届きます。前の形（合言葉）のバックアップも戻せます。' }),
         h('div', { class: 'row' }, fileIn, passIn),
