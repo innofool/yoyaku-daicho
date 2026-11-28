@@ -48,11 +48,84 @@
   const S = { today: '', date: '', view: 'ledger', lmode: 'time', boot: null, day: [], homeYm: '', homeMode: 'count', rcTab: 'all', rcLimit: 10, cTab: 'list', cSort: 'kana', aTab: 'top', ap: {}, pTab: 'list' };
 
   // ---------- 台帳とのやりとり（すべてこの端末の中で完結する） ----------
-  const C = window.YoyakuCore, V = window.YoyakuVault;
+  const C = window.YoyakuCore, V = window.YoyakuVault, A = window.YoyakuAccount;
   const vault = new V.Vault(V.idbStorage());
+  // 受け口（インターネット上の置き場所）が決まっていれば、メールアドレスとパスワードで使う形になる。
+  // 決まっていなければ、前と同じ「合言葉・この端末の中だけ」の形で動く。
+  const acct = window.YOYAKU_API && A ? new A.Account(V.idbStorage('yoyaku-daicho-account'), window.YOYAKU_API) : null;
   let L = null; // 開いている間だけの台帳（ロックすると消える）
+  let base = null; // 前に保存した時の台帳の形（変わったところだけを受け口に送るため）
   let saving = Promise.resolve();
-  function persist() { saving = saving.catch(() => {}).then(() => vault.save(L.db)); return saving; }
+  function openLedger(db) { L = new C.Ledger(db); if (acct) base = A.indexDb(L.db); }
+  function persist() {
+    if (!acct) { saving = saving.catch(() => {}).then(() => vault.save(L.db)); return saving; }
+    const op = A.diffDb(base, L.db); // 変わったところは、その場で取り出す（あとで受け取った変更と混ざらないように）
+    const db = L.db;
+    saving = saving.catch(() => {}).then(async () => { if (op) await acct.record(op); await acct.saveLocal(db); });
+    if (op) scheduleSync(800);
+    return saving;
+  }
+
+  // ---------- 受け口と台帳をそろえる（アカウントの形の時だけ） ----------
+  const SY = { timer: null, every: null, running: null, at: 0, err: '', again: false };
+  function scheduleSync(ms) { if (!acct) return; clearTimeout(SY.timer); SY.timer = setTimeout(() => { syncNow().catch(() => {}); }, ms || 0); }
+  async function syncNow() {
+    if (!acct || !L || !acct.unlocked) return;
+    if (SY.running) { SY.again = true; return SY.running; }
+    SY.running = (async () => {
+      showSync('busy');
+      try {
+        await saving.catch(() => {});
+        if (!L) return;
+        const r = await acct.sync(L.db);
+        if (!L) return;
+        openLedger(r.db); // 受け取った変更を入れた台帳で開き直す（この間の手元の変更は、同じ台帳に入っている）
+        SY.at = Date.now(); SY.err = '';
+        showSync();
+        if (r.changed) await refreshAfterRemote();
+      } catch (e) {
+        SY.err = e.code === 'offline' ? 'offline' : e.status === 401 ? 'login' : e.message;
+        showSync();
+        if (e.status === 401 && L) { await lockNow('入り直し'); gateMsg('ほかの端末でパスワードが変わったか、この端末が外されました。もう一度パスワードを入れてください。'); }
+      } finally {
+        SY.running = null;
+        if (SY.again) { SY.again = false; scheduleSync(500); }
+      }
+    })();
+    return SY.running;
+  }
+  function showSync(state) {
+    const el = $('#sync-state'); if (!el) return;
+    el.hidden = !acct || !L;
+    if (!acct || !L) return;
+    const n = acct.pending.length;
+    let t, cls;
+    if (state === 'busy') { t = '↻ そろえています'; cls = 'busy'; }
+    else if (SY.err === 'offline') { t = '⚠ つながっていません' + (n ? '（未送信 ' + n + '件）' : ''); cls = 'warn'; }
+    else if (SY.err === 'login') { t = '⚠ 入り直しが必要です'; cls = 'warn'; }
+    else if (SY.err) { t = '⚠ そろえられませんでした'; cls = 'warn'; }
+    else if (n) { t = '未送信 ' + n + '件'; cls = 'warn'; }
+    else if (SY.at) { const d = new Date(SY.at); t = '✓ そろっています ' + pad(d.getHours()) + ':' + pad(d.getMinutes()); cls = 'ok'; }
+    else { t = ''; cls = ''; }
+    el.textContent = t; el.className = 'sync-state ' + cls; el.title = SY.err && SY.err !== 'offline' && SY.err !== 'login' ? SY.err : '';
+  }
+  // ほかの端末の変更を受け取った時：入力中なら邪魔をせず、お知らせだけ出す
+  async function refreshAfterRemote() {
+    S.boot = await api('GET', '/bootstrap');
+    $('#store-name').textContent = S.boot.settings.storeName || '予約台帳';
+    const ae = document.activeElement;
+    const busy = P || $$('dialog[open]').length || ['settings', 'security', 'search', 'print', 'csv', 'widget'].includes(S.view) || (S.view === 'customers' && S.cTab !== 'list') || (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName));
+    if (busy) { toast('ほかの端末の変更を受け取りました', false, { label: '画面を更新', fn: () => show(S.view) }); return; }
+    show(S.view);
+  }
+  function startSyncLoop() {
+    clearInterval(SY.every);
+    SY.every = setInterval(() => { if (document.visibilityState === 'visible') syncNow().catch(() => {}); }, 30000);
+  }
+  if (acct) {
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && L) scheduleSync(300); });
+    window.addEventListener('online', () => { if (L) scheduleSync(300); });
+  }
   async function api(method, url, body) {
     if (!L) { showGate(); throw new Error('ロックされています'); }
     touch();
@@ -99,7 +172,10 @@
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkIdle(); });
   async function lockNow(why) {
     if (L) { try { L._log(why || 'ロック'); await persist(); } catch (e) { /* 保存できなくてもロックはする */ } }
-    L = null; vault.lock();
+    // 送っていない変更があれば、ロックの前に送っておく（3秒まで。送れなければ次に開いた時に送る）
+    if (acct && L && why !== '入り直し') await Promise.race([syncNow().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
+    L = null; base = null; vault.lock();
+    if (acct) { acct.lock(); clearInterval(SY.every); clearTimeout(SY.timer); showSync(); }
     gateMode = 'unlock'; showGate();
   }
 
@@ -160,6 +236,15 @@
     S.today = C.localDate();
     if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => { /* なくても台帳は使える */ });
     if (navigator.storage && navigator.storage.persist) { try { S.persisted = await navigator.storage.persist(); } catch (e) { S.persisted = false; } }
+    if (acct) {
+      await acct.load();
+      $('#gate-form').hidden = true; $('#gate-acct').hidden = false;
+      $('#gate-note').textContent = 'お客様の情報は、この端末の中で暗号化してから、インターネット上の置き場所に預けます。置き場所の会社にも、作った人にも中身は読めません。同じメールアドレスとパスワードで、iPadとiPhoneから同じ台帳が見られます。';
+      $('#gate-dir').textContent = 'パスワードを忘れた時は、登録したメールアドレスに確認コードを送って再設定できます。';
+      gateMode = acct.st ? 'unlock' : 'login';
+      showGate();
+      return;
+    }
     gateMode = (await vault.exists()) ? 'unlock' : 'setup';
     showGate();
   }
@@ -168,6 +253,7 @@
     $$('dialog[open]').forEach((d) => d.close());
     $('#movebar').hidden = true;
     closePanel(true);
+    if (acct) { gateScreen(gateMode === 'unlock' && acct.st ? 'unlock' : gateMode === 'unlock' ? 'login' : gateMode); return; }
     const setup = gateMode === 'setup';
     $('#gate-pass2-wrap').hidden = !setup;
     $('#gate-pass2').required = setup;
@@ -202,6 +288,181 @@
     } catch (err) { if (!vault.unlocked) L = null; $('#gate-err').textContent = err.message; }
     finally { $('#gate-btn').disabled = false; $('#gate-btn').textContent = gateMode === 'setup' ? '台帳を作る' : '開く'; $('#gate-pass').value = ''; $('#gate-pass2').value = ''; }
   });
+
+  // ---------- メールアドレスとパスワードの入口（アカウントの形） ----------
+  const G = { email: '', msg: '' };
+  function gateMsg(t) { G.msg = t; const el = $('#gate-acct .gate-msg'); if (el) { el.textContent = t; el.hidden = !t; } }
+  function gateScreen(name, extra) {
+    const box = $('#gate-acct'); box.replaceChildren();
+    const err = h('p', { class: 'err', role: 'alert' });
+    const msg = h('p', { class: 'gate-msg', text: G.msg, hidden: !G.msg });
+    const input = (label, attrs) => { const el = h('input', attrs); return [h('label', null, label, el), el]; };
+    const link = (text, fn) => h('button', { type: 'button', class: 'linkbtn', text, onclick: () => { G.msg = ''; fn(); } });
+    // ボタンを押したら、終わるまで二度押しできないようにする
+    const form = (fields, btnText, fn, links) => {
+      const btn = h('button', { type: 'submit', class: 'primary', text: btnText });
+      const f = h('form', { autocomplete: 'on' }, msg, ...fields, err, btn, links ? h('div', { class: 'gate-links' }, ...links) : null);
+      f.addEventListener('submit', async (e) => {
+        e.preventDefault(); err.textContent = ''; btn.disabled = true; btn.textContent = '確かめています…';
+        try { await fn(); } catch (x) { err.textContent = x.code === 'offline' ? 'インターネットにつながっていません。つながってから、もう一度お試しください。' : x.message; }
+        finally { btn.disabled = false; btn.textContent = btnText; }
+      });
+      box.append(f);
+      nextOnEnterGate(f);
+      const first = $('input', f); if (first && !coarse) first.focus();
+      return f;
+    };
+    const emailIn = () => input('メールアドレス（ID）', { type: 'email', autocomplete: 'username', inputmode: 'email', autocapitalize: 'off', required: true, value: G.email });
+    const passIn = (label, ac) => input(label || 'パスワード', { type: 'password', autocomplete: ac || 'current-password', required: true });
+    const codeIn = () => input('メールに届いた確認コード（6けた）', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: 7, pattern: '[0-9 ]*', required: true });
+    const newPass = () => { const [l1, p1] = passIn('新しいパスワード（' + A.MIN_PASS + '文字以上）', 'new-password'); const [l2, p2] = passIn('もう一度（確認）', 'new-password'); return { els: [l1, l2], get: () => { if (p1.value !== p2.value) throw new Error('確認用のパスワードが一致しません'); return p1.value; } }; };
+
+    if (name === 'login') {
+      const [le, e] = emailIn(), [lp, p] = passIn();
+      form([le, lp], 'ログイン', async () => {
+        G.email = e.value;
+        await acct.login(e.value, p.value); p.value = '';
+        await openAccountLedger();
+      }, [link('パスワードを忘れた', () => { G.email = e.value; gateScreen('reset1'); }), link('はじめて使う（登録する）', () => { G.email = e.value; gateScreen('signup1'); })]);
+    } else if (name === 'unlock') {
+      const [lp, p] = passIn();
+      form([h('p', { class: 'gate-who', text: acct.email }), lp], '開く', async () => {
+        const r = await acct.unlock(p.value); p.value = ''; G.msg = '';
+        if (!(await openAccountLedger())) return;
+        if (r.offline) toast('インターネットにつながっていないため、この端末の中の台帳で開きました。つながると自動でそろえます');
+      }, [link('パスワードを忘れた', () => { G.email = acct.email; gateScreen('reset1'); }), link('この端末からログアウト', gateLogout)]);
+    } else if (name === 'signup1') {
+      const [le, e] = emailIn();
+      form([h('p', { class: 'hint', text: 'IDにするメールアドレスを入れてください。確認コードを送ります。パスワードを忘れた時の再設定のメールも、ここに届きます。' }), le], '確認コードを送る', async () => {
+        await acct.signupStart(e.value); G.email = A.normEmail(e.value);
+        G.msg = G.email + ' に確認コードを送りました（届くまで1分ほどかかることがあります）。'; gateScreen('signup2', { oldVault: await vault.exists() });
+      }, [link('戻る', () => gateScreen('login'))]);
+    } else if (name === 'signup2') {
+      const [lc, c] = codeIn(), np = newPass();
+      const fields = [lc, ...np.els];
+      let oldIn = null;
+      if (extra && extra.oldVault) {
+        const [lo, o] = input('前の合言葉（この端末の台帳を移す時だけ。空なら新しい台帳で始めます）', { type: 'password', autocomplete: 'off' });
+        oldIn = o; fields.push(lo);
+      }
+      form([h('p', { class: 'gate-who', text: G.email }), ...fields], '登録する', async () => {
+        const pw = np.get();
+        let db = null;
+        if (oldIn && oldIn.value) { db = await vault.unlock(oldIn.value); vault.lock(); if (!db) throw new Error('前の合言葉が違います'); }
+        const { recoveryCodes } = await acct.signupFinish(G.email, c.value.replace(/\D/g, ''), pw);
+        // はじめの台帳を受け口に預ける（前の台帳を移す時は、その中身）
+        openLedger(db || C.emptyDb());
+        L._log(db ? '前の台帳をアカウントへ移す' : '台帳を作成');
+        base = A.indexDb(L.db);
+        await acct.saveLocal(L.db);
+        try { await acct.uploadSnapshot(L.db); } catch (x) { /* 届かなければ、次にそろえる時に預ける */ }
+        L = null; base = null;
+        gateScreen('recovery', { codes: recoveryCodes });
+      }, [link('確認コードを送り直す', async () => { try { await acct.signupStart(G.email); gateMsg('確認コードを送り直しました。'); } catch (x) { gateMsg(x.message); } }), link('戻る', () => gateScreen('signup1'))]);
+    } else if (name === 'recovery') {
+      const chk = h('input', { type: 'checkbox' });
+      const btn = h('button', { type: 'button', class: 'primary', text: '台帳を開く', disabled: true, onclick: async () => { btn.disabled = true; try { await openAccountLedger(); } catch (x) { fail(x); btn.disabled = false; } } });
+      chk.addEventListener('change', () => { btn.disabled = !chk.checked; });
+      const [c1, c2] = extra.codes;
+      box.append(h('div', { class: 'gate-rc' },
+        h('h2', { text: '復旧コード（2つ）' }),
+        h('p', { class: 'hint', text: 'パスワードを忘れて、ログインしたことのある端末も手元にない時は、メールの確認コードと、どちらか1つの復旧コードで台帳を開けます。両方なくすと、だれにも開けません（作った人にも）。' }),
+        h('div', { class: 'rc-label', text: '1つ目：お店で保管（金庫など）' }), h('p', { class: 'rc-code', text: c1 }),
+        h('div', { class: 'rc-label', text: '2つ目：信頼できる人に預ける（ご家族など）' }), h('p', { class: 'rc-code', text: c2 }),
+        h('button', { type: 'button', text: '🖨 緊急キットを印刷する（2枚）', onclick: () => printKit(acct.email, { 1: c1, 2: c2 }) }),
+        h('p', { class: 'warn-box', text: '印刷するか紙に書き写して、パスワードとは別の場所に保管してください。写真やメモアプリには残さないでください。この画面は二度と出ません。' }),
+        h('label', { class: 'chk' }, chk, '2つとも紙に残しました'), btn));
+    } else if (name === 'reset1') {
+      const [le, e] = emailIn();
+      form([h('p', { class: 'hint', text: '登録したメールアドレスに、確認コードを送ります。' }), le], '確認コードを送る', async () => {
+        await acct.resetStart(e.value); G.email = A.normEmail(e.value);
+        G.msg = '登録があれば、' + G.email + ' に確認コードを送りました（届くまで1分ほどかかることがあります）。'; gateScreen('reset2');
+      }, [link('戻る', () => gateScreen(acct.st ? 'unlock' : 'login'))]);
+    } else if (name === 'reset2') {
+      const [lc, c] = codeIn();
+      form([h('p', { class: 'gate-who', text: G.email }), lc], '次へ', async () => {
+        const r = await acct.resetVerify(G.email, c.value.replace(/\D/g, ''));
+        G.msg = ''; gateScreen('reset3', r);
+      }, [link('確認コードを送り直す', async () => { try { await acct.resetStart(G.email); gateMsg('確認コードを送り直しました。'); } catch (x) { gateMsg(x.message); } }), link('戻る', () => gateScreen('reset1'))]);
+    } else if (name === 'reset3') {
+      const np = newPass();
+      const fields = [];
+      let rcIn = null;
+      if (extra && extra.usesDevice) fields.push(h('p', { class: 'hint', text: 'この端末はログインしたことがあるので、新しいパスワードを決めるだけで戻せます。' }));
+      else { const [lr, r] = input('復旧コード（紙に控えた24文字）', { type: 'text', autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', required: true, placeholder: 'XXXX-XXXX-XXXX-XXXX-XXXX-XXXX' }); rcIn = r; fields.push(h('p', { class: 'hint', text: 'この端末ではまだログインしたことがないため、復旧コードが要ります。ログインしたことのあるiPadが手元にあれば、そのiPadで再設定すると復旧コードなしで戻せます。' }), lr); }
+      form([...fields, ...np.els], 'パスワードを決めて開く', async () => {
+        await acct.resetFinish(np.get(), rcIn ? rcIn.value : '');
+        G.msg = '';
+        if (!(await openAccountLedger())) return;
+        toast('パスワードを再設定しました。ほかの端末では、新しいパスワードで開き直してください');
+      }, [link('はじめからやり直す', () => gateScreen('reset1'))]);
+    } else if (name === 'loading') {
+      box.append(h('p', { class: 'hint', text: '台帳を受け取っています…' }));
+    }
+  }
+  // 緊急キット（印刷用）。1枚目はお店で保管、2枚目は信頼できる人に預ける。パスワードは書かない
+  function printKit(email, codes) {
+    const area = $('#print-area'); area.replaceChildren();
+    const day = new Date().toLocaleDateString('ja-JP');
+    const sheet = (title, rows, notes) => h('div', { class: 'pg kit' },
+      h('h1', { text: '予約台帳　緊急キット（' + title + '）' }), h('p', { class: 'kit-date', text: '作った日 ' + day }),
+      h('table', null, h('tbody', null, rows.map(([k, v]) => h('tr', null, h('th', { text: k }), h('td', { class: v ? 'kit-val' : 'kit-blank', text: v || '' }))))),
+      h('ul', null, notes.map((t) => h('li', { text: t }))));
+    const url = location.origin + location.pathname;
+    if (codes[1]) area.append(sheet('お店で保管', [['開くアドレス', url], ['ID（メールアドレス）', email], ['復旧コード 1', codes[1]], ['保管した場所', '']], [
+      'パスワードを忘れても、この紙と、登録したメールに届く確認コードで台帳を開けます（「パスワードを忘れた」から）。',
+      'パスワードはこの紙に書かず、別の場所に保管してください。',
+      '写真に撮ったり、メモアプリやパソコンに残したりしないでください。',
+      'この復旧コードを作り直したら、この紙は細かく破って捨ててください。']));
+    if (codes[2]) area.append(sheet('信頼できる人に預ける', [['ID（メールアドレス）', email], ['復旧コード 2', codes[2]], ['預けた人', ''], ['預けた日', '']], [
+      'お店の人が、パスワードと「お店で保管」の紙の両方をなくした時のための紙です。',
+      'この紙だけでは台帳は開けません（お店のメールに届く確認コードも要ります）。',
+      'お店の人に頼まれた時だけ、本人であることを確かめてから、直接伝えてください。',
+      '写真に撮らず、なくさない場所に保管してください。']));
+    window.print();
+  }
+  function nextOnEnterGate(f) {
+    f.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229 || e.target.tagName !== 'INPUT' || e.target.type === 'checkbox') return;
+      const list = $$('input:not([type=checkbox])', f).filter((x) => x.offsetParent !== null), i = list.indexOf(e.target);
+      if (i >= 0 && i < list.length - 1) { e.preventDefault(); list[i + 1].focus(); }
+    });
+  }
+  async function gateLogout() {
+    const n = (await acct.s.get('pending') || []).length;
+    const ok = await ask('この端末からログアウト', (n ? 'まだ送れていない変更が' + n + '件あります。ログアウトすると、その変更は消えます。\n\n' : '') + 'この端末の中の台帳を消して、ログインする前の状態に戻します。受け口に預けた台帳は消えません（ほかの端末や、もう一度ログインすれば見られます）。', { ok: 'ログアウトする' });
+    if (!ok) return false;
+    await acct.logout(); G.email = ''; G.msg = '';
+    gateMode = 'login'; showGate();
+    return true;
+  }
+  // ログインのあと：端末の中の台帳を開き、なければ受け口から受け取る
+  async function openAccountLedger() {
+    let db = null;
+    try { db = await acct.loadLocal(); } catch (e) { db = null; }
+    if (!db) {
+      gateScreen('loading');
+      try { db = (await acct.sync(null)).db; }
+      catch (e) {
+        if (e.code !== 'no_snap') {
+          acct.lock();
+          G.msg = e.code === 'offline' ? 'この端末にはまだ台帳がありません。インターネットにつないでから、もう一度開いてください。' : e.message;
+          gateScreen(acct.st ? 'unlock' : 'login');
+          return false;
+        }
+        // 登録の途中で閉じた時など、受け口にまだ台帳がない時は、新しい台帳を作って預ける
+        db = C.emptyDb(); openLedger(db); L._log('台帳を作成');
+        await acct.uploadSnapshot(L.db);
+      }
+    }
+    openLedger(db);
+    L._log('開く'); await persist();
+    gateMode = 'unlock'; touch(); G.msg = '';
+    SY.err = ''; SY.at = 0;
+    await enter();
+    startSyncLoop(); scheduleSync(200);
+    return true;
+  }
 
   async function enter() {
     S.boot = await api('GET', '/bootstrap');
@@ -1325,7 +1586,115 @@
       listBox('お客様属性', 'custAttrs', 'お客様に付ける印（例：VIP、要注意、常連さま）', S.boot.custAttrs, 20), freeBox);
   }
 
+  // ---------- 安全・バックアップ（アカウントの形） ----------
+  async function renderSecurityAccount() {
+    const box = $('#sec-body'); box.replaceChildren();
+    const pw = (ph) => h('input', { type: 'password', autocomplete: 'off', placeholder: ph || '' });
+    const lab = (t, el) => h('label', null, t, el);
+    const panel = (title, ...kids) => h('div', { class: 'panel-box' }, h('h3', { text: title }), ...kids);
+    const run = (fn) => async () => { try { touch(); await fn(); } catch (e) { fail(e.code === 'offline' ? new Error('インターネットにつながっている時にお試しください') : e); } };
+
+    const n = acct.pending.length;
+    const info = panel('アカウントと保存場所',
+      h('dl', { class: 'kvs' },
+        h('dt', { text: 'ID（メールアドレス）' }), h('dd', { text: acct.email }),
+        h('dt', { text: '保存場所' }), h('dd', { text: 'この端末の中と、インターネット上の置き場所（Cloudflare）。どちらも暗号化したままで、置き場所の会社にも作った人にも読めません。' }),
+        h('dt', { text: '受け口とそろえた時刻' }), h('dd', { text: SY.at ? new Date(SY.at).toLocaleString('ja-JP') : 'まだです' }),
+        h('dt', { text: 'まだ送れていない変更' }), h('dd', { text: n ? n + '件（インターネットにつながると自動で送ります）' : 'ありません' })),
+      h('div', { class: 'actions' }, h('button', { type: 'button', text: '今すぐそろえる', onclick: run(async () => { await syncNow(); toast(SY.err ? 'そろえられませんでした' : 'そろえました', !!SY.err); renderSecurityAccount().catch(fail); }) })));
+
+    const o = pw(), n1 = pw(), n2 = pw();
+    const pwPanel = panel('パスワードを変える',
+      h('div', { class: 'row' }, lab('今のパスワード', o), lab('新しいパスワード（' + A.MIN_PASS + '文字以上）', n1), lab('もう一度', n2)),
+      h('p', { class: 'hint', text: '変えると、ほかの端末は新しいパスワードで開き直しになります。インターネットにつながっている時だけ変えられます。' }),
+      h('div', { class: 'actions' }, h('span', { class: 'sep' }), h('button', { class: 'primary', type: 'button', text: '変える', onclick: run(async () => {
+        if (n1.value !== n2.value) throw new Error('確認用のパスワードが一致しません');
+        await acct.changePassword(o.value, n1.value);
+        L._log('パスワードを変更'); await persist();
+        o.value = n1.value = n2.value = '';
+        toast('パスワードを変えました。ほかの端末では新しいパスワードで開き直してください');
+      }) })));
+
+    const rp = pw('今のパスワード'), rcOut = h('div');
+    const slotSel = h('select', { 'aria-label': 'どちらの復旧コード' }, h('option', { value: '1', text: '1つ目（お店で保管）' }), h('option', { value: '2', text: '2つ目（信頼できる人に預けた）' }));
+    const rcPanel = panel('復旧コードを作り直す',
+      h('p', { class: 'hint', text: '復旧コードは2つあり、どちらか1つあれば戻せます。なくした時や、だれかに見られたかもしれない時は、その1つを作り直します。作り直すと、その前の復旧コードは使えなくなります（もう1つはそのまま使えます）。' }),
+      h('div', { class: 'row' }, lab('作り直す復旧コード', slotSel), lab('今のパスワード', rp)), rcOut,
+      h('div', { class: 'actions' }, h('span', { class: 'sep' }), h('button', { type: 'button', text: '作り直す', onclick: run(async () => {
+        const slot = +slotSel.value;
+        if (!(await ask('復旧コードを作り直します', (slot === 2 ? '2つ目（信頼できる人に預けた）' : '1つ目（お店で保管）') + 'の復旧コードを作り直します。前のものは使えなくなるので、古い紙は細かく破って捨ててください。', { ok: '作り直す' }))) return;
+        const { recoveryCode } = await acct.newRecoveryCode(rp.value, slot);
+        rp.value = '';
+        L._log('復旧コード' + slot + 'を作り直し'); await persist();
+        rcOut.replaceChildren(h('p', { class: 'rc-code', text: recoveryCode }),
+          h('button', { type: 'button', text: '🖨 緊急キットを印刷する', onclick: () => printKit(acct.email, { [slot]: recoveryCode }) }),
+          h('p', { class: 'warn-box', text: '印刷するか紙に書き写して、安全な場所に保管してください。この画面を閉じると、二度と出ません。' }));
+      }) })));
+
+    const devBox = h('div', { class: 'hint', text: '読み込んでいます…' });
+    const devPanel = panel('ログインしている端末', devBox,
+      h('p', { class: 'hint', text: 'なくした端末や、もう使わない端末は「外す」を押してください。その端末では台帳が開けなくなります（その端末の中の台帳は暗号化されたままです）。' }));
+    acct.devices().then((list) => {
+      devBox.replaceChildren(h('table', { class: 'tbl' }, h('tbody', null, list.map((d) => h('tr', null,
+        h('td', { text: d.name + (d.current ? '（この端末）' : '') }), h('td', { class: 'muted', text: '最後に使った日 ' + new Date(d.lastSeen).toLocaleDateString('ja-JP') }),
+        h('td', null, d.current ? null : h('button', { type: 'button', class: 'danger', text: '外す', onclick: run(async () => {
+          if (!(await ask('端末を外します', '「' + d.name + '」では、台帳が開けなくなります。', { ok: '外す' }))) return;
+          await acct.removeDevice(d.id); L._log('端末を外す'); await persist(); toast('外しました'); renderSecurityAccount().catch(fail);
+        }) })))))));
+    }).catch((e) => { devBox.textContent = e.code === 'offline' ? 'インターネットにつながっている時に表示します' : e.message; });
+
+    const snaps = await acct.snapshots();
+    const last = L.db.lastBackupAt;
+    const doExport = async (snap) => {
+      try {
+        const text = snap ? await acct.exportSnapshot(snap) : await acct.exportBackup(L.db);
+        const r = await shareOrDownload('予約台帳_' + (snap || C.localDate()) + '.yoyaku', new Blob([text], { type: 'application/octet-stream' }));
+        if (r === 'aborted') return;
+        if (!snap) { L.db.lastBackupAt = new Date().toISOString(); L._log('バックアップを書き出し'); await persist(); }
+        toast('書き出しました。iPadの外（Macや外付け）にも置いてください');
+        renderSecurityAccount().catch(fail);
+      } catch (err) { fail(err); }
+    };
+    const snapSel = h('select', { 'aria-label': '控えの日付' }, snaps.map((d) => h('option', { value: d, text: d })));
+    const fileIn = h('input', { type: 'file', accept: '.yoyaku,application/octet-stream,application/json,text/plain' });
+    const passIn = pw('そのバックアップを書き出した時のパスワード（前の形なら合言葉）');
+    const bPanel = panel('バックアップ',
+      h('dl', { class: 'kvs' },
+        h('dt', { text: '最後のバックアップ' }), h('dd', { text: last ? new Date(last).toLocaleString('ja-JP') : 'まだありません' }),
+        h('dt', { text: 'この端末の毎日の控え' }), h('dd', { text: snaps.length ? snaps.length + '日分（14日分を残します）' : 'まだありません' })),
+      h('p', { class: 'hint', text: '台帳は置き場所にも預けてありますが、念のため月に1回は書き出して、「ファイル」アプリやAirDropでiPadの外に置いてください。ファイルは暗号化されたままで、書き出した時のパスワードがなければ読めません。' }),
+      h('div', { class: 'actions' }, h('button', { class: 'primary', type: 'button', text: 'バックアップを書き出す', onclick: () => doExport(null) }),
+        snaps.length ? snapSel : null, snaps.length ? h('button', { type: 'button', text: 'この日の控えを書き出す', onclick: () => doExport(snapSel.value) }) : null),
+      h('details', { style: 'margin-top:10px' }, h('summary', { text: 'バックアップから戻す' }),
+        h('p', { class: 'hint', text: '今の台帳を、バックアップの中身で置き換えます。置き換えた内容は、ほかの端末にも届きます。前の形（合言葉）のバックアップも戻せます。' }),
+        h('div', { class: 'row' }, fileIn, passIn),
+        h('div', { class: 'actions' }, h('span', { class: 'sep' }), h('button', { class: 'danger', type: 'button', text: '戻す', onclick: run(async () => {
+          const f = fileIn.files && fileIn.files[0];
+          if (!f) throw new Error('バックアップのファイルを選んでください');
+          if (!(await ask('バックアップから戻します', '今の台帳を「' + f.name + '」の中身で置き換えます。ほかの端末の台帳も置き換わります。', { ok: '戻す' }))) return;
+          const text = await f.text();
+          let db = await A.openBackup(text, passIn.value);
+          if (!db) db = await new V.Vault(V.memoryStorage()).importText(text, passIn.value); // 前の形（合言葉）のバックアップ
+          // 置き換えた違いが、ふつうの変更として受け口に送られる
+          L = new C.Ledger(db); L._log('バックアップから戻す'); await persist(); // base は前の台帳のまま → 違いがすべて変更になる
+          toast('戻しました'); await enter();
+        }) }))));
+
+    const lg = await api('GET', '/log');
+    const lPanel = h('details', { class: 'panel-box' }, h('summary', { text: '操作の記録（だれが何をしたかの目安。お客様の名前は記録しません）' }),
+      h('div', { class: 'table-wrap', style: 'max-height:300px;margin-top:8px' }, h('table', { class: 'tbl' }, h('tbody', null, lg.log.map((x) => h('tr', null, h('td', { text: new Date(x.t).toLocaleString('ja-JP') }), h('td', { text: x.act }), h('td', { text: x.ref })))))));
+    const lockPanel = panel('ロック・ログアウト',
+      h('p', { class: 'hint', text: '席を離れる時は「ロックする」。この端末をもう使わない時は「この端末からログアウト」（この端末の中の台帳を消します。置き場所の台帳は残ります）。' }),
+      h('div', { class: 'actions' }, h('button', { class: 'primary', type: 'button', text: 'ロックする', onclick: () => lockNow('ロック') }), h('span', { class: 'sep' }),
+        h('button', { class: 'danger', type: 'button', text: 'この端末からログアウト', onclick: run(async () => {
+          await saving.catch(() => {}); await syncNow().catch(() => {});
+          if (await gateLogout()) { L = null; base = null; clearInterval(SY.every); clearTimeout(SY.timer); showSync(); }
+        }) })));
+    box.append(info, pwPanel, rcPanel, devPanel, bPanel, lPanel, lockPanel);
+  }
+
   async function renderSecurity() {
+    if (acct) return renderSecurityAccount();
     const box = $('#sec-body'); box.replaceChildren();
     const inp = (name, type) => h('input', { name, type: type || 'password', autocomplete: 'off' });
     const lab = (t, el) => h('label', null, t, el);

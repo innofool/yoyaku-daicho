@@ -1,8 +1,8 @@
 'use strict';
 // 電波がない時でも台帳を開けるように、画面のファイル（プログラムだけ）を端末にしまっておく。
 // お客様の情報はここでは扱わない（台帳の中身はIndexedDBに暗号化して保存されている）。
-const CACHE = 'yoyaku-app-v6';
-const FILES = ['./', './index.html', './style.css', './core.js', './vault.js', './app.js', './manifest.webmanifest', './icon.svg', './icon-180.png', './icon-512.png'];
+const CACHE = 'yoyaku-app-v9';
+const FILES = ['./', './index.html', './style.css', './core.js', './config.js', './vault.js', './account.js', './app.js', './manifest.webmanifest', './icon.svg', './icon-180.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting()));
