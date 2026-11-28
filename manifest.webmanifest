@@ -1,6 +1,6 @@
 {
-  "name": "OMOTENASI",
-  "short_name": "OMOTENASI",
+  "name": "OMOTENASI予約",
+  "short_name": "OMOTENASI予約",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
